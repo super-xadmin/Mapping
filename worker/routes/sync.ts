@@ -7,7 +7,8 @@ import { DAY_MS } from "../../shared/time";
 import { CHUNK_MAX_POINTS, SYNC_MAX_OPS, type PtArr, type SyncResult } from "../../shared/types";
 import type { AppEnv } from "../env";
 import { requireRole, requireUser } from "../auth";
-import { LOCKED_MSG, audit, fail, isUuid, now, qs, readJson, str } from "../util";
+import { audit, fail, isUuid, now, qs, readJson, str, tr } from "../util";
+import type { SharedKey } from "../../shared/i18n";
 
 type RoundState = {
   id: string; session_id: string; seq: number | null; topic: string;
@@ -43,7 +44,7 @@ syncRoutes.use("*", requireUser, requireRole(can.record));
 
 syncRoutes.post("/", async (c) => {
   const b = await readJson(c);
-  if (!Array.isArray(b.ops)) fail(400, "ข้อมูลไม่ถูกต้อง");
+  if (!Array.isArray(b.ops)) fail(400, "err.syncBad");
   const ops = (b.ops as Record<string, unknown>[]).slice(0, SYNC_MAX_OPS).filter((o) => o && typeof o === "object");
   const DB = c.env.DB;
   const user = c.get("user");
@@ -75,28 +76,28 @@ syncRoutes.post("/", async (c) => {
 
   const stmts: D1PreparedStatement[] = [];
   const results: SyncResult[] = [];
-  const sessErr = (sid: string): string | null => {
+  const sessErr = (sid: string): SharedKey | null => {
     const s = sessions.get(sid);
-    if (!s) return "ไม่พบงานนี้ (อาจถูกลบไปแล้ว)";
-    if (s.qc_status === "PASSED") return LOCKED_MSG;
+    if (!s) return "err.sessionNotFound";
+    if (s.qc_status === "PASSED") return "err.locked";
     return null;
   };
 
   for (const op of ops) {
     const id = typeof op.id === "string" ? op.id.slice(0, 64) : "";
     if (!id) continue;
-    const done = (error?: string | null) => results.push(error ? { id, ok: false, error } : { id, ok: true });
+    const done = (error?: SharedKey | null) => results.push(error ? { id, ok: false, error: tr(c, error), code: error } : { id, ok: true });
     const sid = isUuid(op.sessionId) ? op.sessionId : "";
 
     switch (op.k) {
       case "round.add": {
         const topic = str(op.topic, 200);
-        if (!isUuid(op.roundId) || !topic) { done("ข้อมูลรอบไม่ถูกต้อง"); break; }
+        if (!isUuid(op.roundId) || !topic) { done("err.roundBad"); break; }
         const e = sessErr(sid);
         if (e) { done(e); break; }
-        if (!sessions.get(sid)!.split_rounds) { done("งานนี้ไม่ได้แบ่งรอบ"); break; }
+        if (!sessions.get(sid)!.split_rounds) { done("err.notSplit"); break; }
         const existing = rounds.get(op.roundId);
-        if (existing) { done(existing.session_id === sid ? null : "รหัสรอบซ้ำ"); break; }
+        if (existing) { done(existing.session_id === sid ? null : "err.roundDup"); break; }
         stmts.push(
           DB.prepare("INSERT OR IGNORE INTO rounds (id, session_id, seq, topic) SELECT ?, ?, COALESCE(MAX(seq), 0) + 1, ? FROM rounds WHERE session_id = ?")
             .bind(op.roundId, sid, topic, sid),
@@ -113,12 +114,12 @@ syncRoutes.post("/", async (c) => {
       case "round.end":
       case "chunk": {
         const r = isUuid(op.roundId) ? rounds.get(op.roundId) : undefined;
-        if (!r || r.session_id !== sid) { done("ไม่พบรอบนี้"); break; }
+        if (!r || r.session_id !== sid) { done("err.roundNotFound"); break; }
         const e = sessErr(sid);
         if (e) { done(e); break; }
 
         if (op.k === "round.start") {
-          if (!okT(op.t)) { done("เวลาไม่ถูกต้อง"); break; }
+          if (!okT(op.t)) { done("err.badTime"); break; }
           if (r.started_at == null) {
             stmts.push(
               DB.prepare("UPDATE rounds SET started_at = ?, started_by = ? WHERE id = ? AND started_at IS NULL").bind(op.t, user.id, r.id),
@@ -131,8 +132,8 @@ syncRoutes.post("/", async (c) => {
         }
 
         if (op.k === "round.end") {
-          if (!okT(op.t)) { done("เวลาไม่ถูกต้อง"); break; }
-          if (r.started_at == null) { done("รอบนี้ยังไม่ได้เริ่ม"); break; }
+          if (!okT(op.t)) { done("err.badTime"); break; }
+          if (r.started_at == null) { done("err.roundNotStarted"); break; }
           if (r.ended_at == null) {
             const endT = Math.max(op.t, r.started_at);
             stmts.push(
@@ -146,9 +147,9 @@ syncRoutes.post("/", async (c) => {
         }
 
         // chunk: ก้อนพิกัด GPS
-        if (!okT(op.t0)) { done("เวลาไม่ถูกต้อง"); break; }
+        if (!okT(op.t0)) { done("err.badTime"); break; }
         const pts = cleanPoints(op.pts);
-        if (!pts) { done("ข้อมูลพิกัดไม่ถูกต้อง"); break; }
+        if (!pts) { done("err.ptsBad"); break; }
         const t0 = op.t0;
         let dist = 0;
         for (let i = 1; i < pts.length; i++) dist += haversine(pts[i - 1][1], pts[i - 1][2], pts[i][1], pts[i][2]);
@@ -179,11 +180,11 @@ syncRoutes.post("/", async (c) => {
       }
 
       case "cal.start": {
-        if (!isUuid(op.calId) || !isCalKind(op.kind) || !okT(op.t)) { done("ข้อมูล Calibration ไม่ถูกต้อง"); break; }
+        if (!isUuid(op.calId) || !isCalKind(op.kind) || !okT(op.t)) { done("err.calBad"); break; }
         const e = sessErr(sid);
         if (e) { done(e); break; }
         const existing = cals.get(op.calId);
-        if (existing) { done(existing.session_id === sid ? null : "รหัส Calibration ซ้ำ"); break; }
+        if (existing) { done(existing.session_id === sid ? null : "err.calDup"); break; }
         stmts.push(
           DB.prepare(
             `INSERT OR IGNORE INTO calibrations (id, session_id, seq, kind, started_at, created_by, created_at)
@@ -198,8 +199,8 @@ syncRoutes.post("/", async (c) => {
 
       case "cal.end": {
         const cal = isUuid(op.calId) ? cals.get(op.calId) : undefined;
-        if (!cal || cal.session_id !== sid) { done("ไม่พบรายการ Calibration"); break; }
-        if (!okT(op.t)) { done("เวลาไม่ถูกต้อง"); break; }
+        if (!cal || cal.session_id !== sid) { done("err.calNotFound"); break; }
+        if (!okT(op.t)) { done("err.badTime"); break; }
         const e = sessErr(sid);
         if (e) { done(e); break; }
         if (cal.ended_at == null) {
@@ -215,7 +216,7 @@ syncRoutes.post("/", async (c) => {
       }
 
       default:
-        done("ไม่รู้จักรายการนี้");
+        done("err.unknownOp");
     }
   }
 
@@ -224,7 +225,7 @@ syncRoutes.post("/", async (c) => {
       await DB.batch(stmts);
     } catch (err) {
       console.error("sync batch failed", err);
-      fail(503, "บันทึกข้อมูลไม่สำเร็จ ระบบจะลองส่งใหม่อัตโนมัติ", "retry");
+      fail(503, "err.syncRetry", undefined, undefined, "retry");
     }
   }
   return c.json({ results });

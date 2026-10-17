@@ -1,36 +1,130 @@
-// สร้างงาน Mapping ใหม่ (กำหนดรอบ + เวลาตามแผน)
+// เริ่มงานใหม่แบบเร็ว: จำโปรเจกต์/คนขับ/รถที่ใช้ล่าสุด ตั้งชื่องานให้อัตโนมัติ แล้วไปหน้าบันทึกทันที
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router";
-import { bkkDate, fmtClock, fmtDuration, resolvePlannedRounds, type PlannedRoundInput } from "../../shared/time";
+import { can } from "../../shared/labels";
+import { addMinutesHHMM, bkkDate, bkkHHMM, resolvePlannedRounds, type PlannedRoundInput } from "../../shared/time";
 import type { Master } from "../../shared/types";
+import { useI18n } from "../i18n";
 import { api, errMsg } from "../lib/api";
 import { useAuth } from "../lib/auth";
-import { can } from "../../shared/labels";
+import { SOP } from "../lib/sop";
+import { lsGet, lsSet } from "../lib/store";
+
+const K_LAST = "mlog:newjob:last";
+type Last = { projectId?: string; driverId?: string; vehicleId?: string; splitRounds?: boolean };
+type Opt = { id: string; main: string; sub?: string | null };
+const RUN_DEFAULT_MIN = 120; // รอบใหม่ยาว 2 ชม. ตามค่าเริ่มต้น
+
+/** เวลาปัจจุบันปัดขึ้นเป็นทุก 15 นาที (เวลาไทย) — ไม่ข้ามไปเที่ยงคืน (จะกลายเป็นเวลาที่ผ่านไปแล้วของวันทำงาน) */
+function roundedNow(): string {
+  const [h, m] = bkkHHMM(Date.now()).split(":").map(Number);
+  return addMinutesHHMM("00:00", Math.min(Math.ceil((h * 60 + m) / 15) * 15, 23 * 60 + 45));
+}
+
+/** เลือกได้ด้วยการแตะครั้งเดียว (ถ้าตัวเลือกไม่เกิน 6 รายการ) ไม่งั้นเป็น dropdown */
+function Choice({ label, value, onChange, options }: { label: string; value: string; onChange: (v: string) => void; options: Opt[] }) {
+  const { t } = useI18n();
+  if (options.length <= 6) {
+    return (
+      <div className="field">
+        <span>{label} *</span>
+        <div className="chips" role="radiogroup" aria-label={label}>
+          {options.map((o) => (
+            <button
+              key={o.id}
+              type="button"
+              role="radio"
+              aria-checked={o.id === value}
+              className={`chip big-chip${o.id === value ? " on" : ""}`}
+              onClick={() => onChange(o.id)}
+            >
+              <b>{o.main}</b>
+              {o.sub && <small>{o.sub}</small>}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  return (
+    <label className="field">
+      <span>{label} *</span>
+      <select value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="">{t("c.choose")}</option>
+        {options.map((o) => (
+          <option key={o.id} value={o.id}>{o.main}{o.sub ? ` (${o.sub})` : ""}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
 
 export default function NewSession() {
   const nav = useNavigate();
   const { user } = useAuth();
+  const { t, f } = useI18n();
+  const today = bkkDate();
   const [m, setM] = useState<Master | null>(null);
-  const [f, setF] = useState({ title: "", workDate: bkkDate(), driverId: "", vehicleId: "", projectId: "", notes: "", splitRounds: false });
-  const [rounds, setRounds] = useState<PlannedRoundInput[]>([{ topic: "", plannedStart: "08:00", plannedEnd: "12:00" }]);
+  const [form, setForm] = useState(() => {
+    const last = lsGet<Last>(K_LAST, {});
+    return { projectId: "", driverId: "", vehicleId: "", workDate: today, title: "", notes: "", splitRounds: !!last.splitRounds };
+  });
+  const [editDate, setEditDate] = useState(false);
+  const [rounds, setRounds] = useState<PlannedRoundInput[]>(() => {
+    const start = roundedNow();
+    return [{ topic: "", plannedStart: start, plannedEnd: addMinutesHHMM(start, RUN_DEFAULT_MIN) }];
+  });
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    api<Master>("/master").then(setM).catch((e) => setErr(errMsg(e)));
+    api<Master>("/master")
+      .then((mm) => {
+        setM(mm);
+        const last = lsGet<Last>(K_LAST, {});
+        // ใช้ค่าที่เลือกล่าสุด (ถ้ายังใช้งานอยู่) หรือเลือกให้เลยถ้ามีตัวเลือกเดียว
+        const pick = (list: { id: string; active: boolean }[], lastId?: string) => {
+          const act = list.filter((x) => x.active);
+          if (lastId && act.some((x) => x.id === lastId)) return lastId;
+          return act.length === 1 ? act[0].id : "";
+        };
+        setForm((x) => ({
+          ...x,
+          projectId: x.projectId || pick(mm.projects, last.projectId),
+          driverId: x.driverId || pick(mm.drivers, last.driverId),
+          vehicleId: x.vehicleId || pick(mm.vehicles, last.vehicleId),
+        }));
+      })
+      .catch((e) => setErr(errMsg(e)));
   }, []);
 
-  const set = (k: keyof typeof f, v: string | boolean) => setF((x) => ({ ...x, [k]: v }));
+  const set = <K extends keyof typeof form>(k: K, v: (typeof form)[K]) => setForm((x) => ({ ...x, [k]: v }));
   const setR = (i: number, k: keyof PlannedRoundInput, v: string) => setRounds((rs) => rs.map((r, j) => (j === i ? { ...r, [k]: v } : r)));
-  const plan = f.splitRounds && f.workDate ? resolvePlannedRounds(f.workDate, rounds) : null;
+  const addRun = () =>
+    setRounds((rs) => {
+      const start = rs[rs.length - 1]?.plannedEnd || roundedNow();
+      return [...rs, { topic: "", plannedStart: start, plannedEnd: addMinutesHHMM(start, RUN_DEFAULT_MIN) }];
+    });
+
+  const projects = m?.projects.filter((p) => p.active) ?? [];
+  const drivers = m?.drivers.filter((d) => d.active) ?? [];
+  const vehicles = m?.vehicles.filter((v) => v.active) ?? [];
+  const missing = m && (!drivers.length || !vehicles.length || !projects.length);
+  const project = projects.find((p) => p.id === form.projectId);
+  const vehicle = vehicles.find((v) => v.id === form.vehicleId);
+  const autoTitle = [project?.name, vehicle?.plate].filter(Boolean).join(" · ");
+  const plan = form.splitRounds && form.workDate ? resolvePlannedRounds(form.workDate, rounds) : null;
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setErr("");
-    if (plan && !plan.ok) return setErr(plan.error);
+    if (!form.projectId || !form.driverId || !form.vehicleId) return setErr(t("err.refsRequired"));
+    if (plan && !plan.ok) return setErr(f.msg(plan.error));
+    const title = form.title.trim() || autoTitle;
     setBusy(true);
     try {
-      const r = await api<{ id: string }>("/sessions", { body: { ...f, rounds } });
+      const r = await api<{ id: string }>("/sessions", { body: { ...form, title, rounds } });
+      lsSet(K_LAST, { projectId: form.projectId, driverId: form.driverId, vehicleId: form.vehicleId, splitRounds: form.splitRounds } satisfies Last);
       nav(`/record/${r.id}`);
     } catch (e) {
       setErr(errMsg(e));
@@ -38,100 +132,98 @@ export default function NewSession() {
     }
   }
 
-  const drivers = m?.drivers.filter((d) => d.active) ?? [];
-  const vehicles = m?.vehicles.filter((v) => v.active) ?? [];
-  const projects = m?.projects.filter((p) => p.active) ?? [];
-  const missing = m && (!drivers.length || !vehicles.length || !projects.length);
-
   return (
-    <form className="card" onSubmit={submit}>
-      <h2>สร้างงาน Mapping ใหม่</h2>
-      {missing && (
-        <div className="alert warn">
-          ยังไม่มีคนขับ / รถ / โปรเจกต์ในระบบ{" "}
-          {user && can.admin(user.role) ? <Link to="/admin?tab=master">เพิ่มที่หน้าจัดการระบบ</Link> : "กรุณาให้ผู้ดูแลระบบเพิ่มก่อน"}
-        </div>
-      )}
-      <div className="grid">
-        <label className="field">
-          <span>ชื่องาน *</span>
-          <input required maxLength={200} value={f.title} onChange={(e) => set("title", e.target.value)} placeholder="เช่น สำรวจถนน 304 ช่วง กม.10–40" />
-        </label>
-        <label className="field">
-          <span>วันที่ทำงาน *</span>
-          <input type="date" required value={f.workDate} onChange={(e) => set("workDate", e.target.value)} />
-        </label>
-        <label className="field">
-          <span>โปรเจกต์ / พื้นที่ *</span>
-          <select required value={f.projectId} onChange={(e) => set("projectId", e.target.value)}>
-            <option value="">เลือก</option>
-            {projects.map((p) => <option key={p.id} value={p.id}>{p.name}{p.area ? ` (${p.area})` : ""}</option>)}
-          </select>
-        </label>
-        <label className="field">
-          <span>คนขับ / ทีม *</span>
-          <select required value={f.driverId} onChange={(e) => set("driverId", e.target.value)}>
-            <option value="">เลือก</option>
-            {drivers.map((d) => <option key={d.id} value={d.id}>{d.name}{d.team ? ` (${d.team})` : ""}</option>)}
-          </select>
-        </label>
-        <label className="field">
-          <span>รถ / อุปกรณ์ *</span>
-          <select required value={f.vehicleId} onChange={(e) => set("vehicleId", e.target.value)}>
-            <option value="">เลือก</option>
-            {vehicles.map((v) => <option key={v.id} value={v.id}>{v.plate}{v.equipment ? ` (${v.equipment})` : ""}</option>)}
-          </select>
-        </label>
-      </div>
-      <label className="field">
-        <span>หมายเหตุ</span>
-        <textarea rows={2} maxLength={2000} value={f.notes} onChange={(e) => set("notes", e.target.value)} />
-      </label>
+    <form className="newjob" onSubmit={submit}>
+      <div className="card">
+        <h2>{t("nj.title")}</h2>
+        {missing && (
+          <div className="alert warn">
+            {t("nj.missing")}{" "}
+            {user && can.admin(user.role) ? <Link to="/admin?tab=master">{t("nj.missingAdmin")}</Link> : t("nj.missingAsk")}
+          </div>
+        )}
+        <Choice label={t("col.project")} value={form.projectId} onChange={(v) => set("projectId", v)} options={projects.map((p) => ({ id: p.id, main: p.name, sub: p.area }))} />
+        <Choice label={t("col.driver")} value={form.driverId} onChange={(v) => set("driverId", v)} options={drivers.map((d) => ({ id: d.id, main: d.name, sub: d.team }))} />
+        <Choice label={t("col.vehicle")} value={form.vehicleId} onChange={(v) => set("vehicleId", v)} options={vehicles.map((v) => ({ id: v.id, main: v.plate, sub: v.equipment }))} />
 
-      <div className="subcard">
-        <label className="check big">
-          <input type="checkbox" checked={f.splitRounds} onChange={(e) => set("splitRounds", e.target.checked)} />
-          แบ่งรอบการเก็บข้อมูล
+        <div>
+          <div className="field">
+            <span>{t("nj.date")}</span>
+            {editDate ? (
+              <input type="date" required value={form.workDate} onChange={(e) => set("workDate", e.target.value)} />
+            ) : (
+              <div className="date-line">
+                <b>{form.workDate === today ? `${t("c.today")} · ${f.date(form.workDate)}` : f.date(form.workDate)}</b>
+                <button type="button" className="link" onClick={() => setEditDate(true)}>{t("nj.change")}</button>
+              </div>
+            )}
+          </div>
+          <label className="field">
+            <span>{t("nj.jobName")}</span>
+            <input maxLength={200} value={form.title} onChange={(e) => set("title", e.target.value)} placeholder={autoTitle ? t("nj.jobNamePh", { auto: autoTitle }) : ""} />
+          </label>
+        </div>
+      </div>
+
+      <div className="card">
+        <label className="switch">
+          <input type="checkbox" checked={form.splitRounds} onChange={(e) => set("splitRounds", e.target.checked)} />
+          <span className="switch-ui" aria-hidden />
+          <b>{t("nj.split")}</b>
         </label>
-        {!f.splitRounds && <p className="muted">ไม่แบ่งรอบ: ทั้งวันนับเป็น 1 รอบ ระบบบันทึกเวลาเริ่ม–จบจริงให้อัตโนมัติเมื่อกดปุ่ม</p>}
-        {f.splitRounds && (
+        <p className="muted small">{form.splitRounds ? t("nj.splitHelp") : t("nj.noSplitHelp")}</p>
+        <p className="sop-note">{t("nj.sopHint")}</p>
+        {form.splitRounds && (
           <>
-            <p className="muted">
-              ระบุหัวข้อและเวลาที่วางแผนไว้ของทุกรอบ ระบบจะบันทึกเวลาจริงเทียบกับแผนตอนกดเริ่ม/จบ (งานข้ามเที่ยงคืนใส่เวลาตามจริงได้เลย ระบบจะนับเป็นวันถัดไปให้)
-            </p>
             <div className="round-list">
               {rounds.map((r, i) => (
                 <div className="round-item" key={i}>
                   <div className="row between m0">
-                    <b>รอบที่ {i + 1}</b>
+                    <b>{t("nj.run", { n: i + 1 })}</b>
                     {rounds.length > 1 && (
-                      <button type="button" className="link bad-text" onClick={() => setRounds(rounds.filter((_, j) => j !== i))}>ลบ</button>
+                      <button type="button" className="link bad-text" onClick={() => setRounds(rounds.filter((_, j) => j !== i))}>{t("c.delete")}</button>
                     )}
                   </div>
                   <label className="field">
-                    <span>หัวข้อการเก็บ *</span>
-                    <input required value={r.topic} maxLength={200} onChange={(e) => setR(i, "topic", e.target.value)} placeholder="เช่น เก็บ LiDAR ฝั่งขาเข้า" />
+                    <span>{t("nj.topic")} *</span>
+                    <input required value={r.topic} maxLength={200} onChange={(e) => setR(i, "topic", e.target.value)} placeholder={t("nj.topicPh")} />
                   </label>
                   <div className="two-col">
-                    <label className="field"><span>เริ่ม *</span><input type="time" required value={r.plannedStart} onChange={(e) => setR(i, "plannedStart", e.target.value)} /></label>
-                    <label className="field"><span>ถึง *</span><input type="time" required value={r.plannedEnd} onChange={(e) => setR(i, "plannedEnd", e.target.value)} /></label>
+                    <label className="field"><span>{t("nj.start")} *</span><input type="time" required value={r.plannedStart} onChange={(e) => setR(i, "plannedStart", e.target.value)} /></label>
+                    <label className="field"><span>{t("nj.end")} *</span><input type="time" required value={r.plannedEnd} onChange={(e) => setR(i, "plannedEnd", e.target.value)} /></label>
                   </div>
-                  <div className="muted small">
-                    ตามแผน: {plan?.ok ? `${fmtClock(plan.times[i][0], f.workDate)} – ${fmtClock(plan.times[i][1], f.workDate)} (${fmtDuration(plan.times[i][1] - plan.times[i][0])})` : "-"}
-                  </div>
+                  {plan?.ok && (
+                    <div className="muted small">
+                      {t("nj.planned", {
+                        v: `${f.clock(plan.times[i][0], form.workDate)} – ${f.clock(plan.times[i][1], form.workDate)} (${f.dur(plan.times[i][1] - plan.times[i][0])})`,
+                      })}
+                    </div>
+                  )}
+                  {plan?.ok && plan.times[i][1] - plan.times[i][0] > SOP.MAX_LOOP_MS && (
+                    <div className="warn-text small">⚠ {t("nj.over3h", { n: i + 1 })}</div>
+                  )}
                 </div>
               ))}
             </div>
-            {plan && !plan.ok && <div className="alert warn">{plan.error}</div>}
-            <button type="button" onClick={() => setRounds([...rounds, { topic: "", plannedStart: rounds[rounds.length - 1]?.plannedEnd ?? "", plannedEnd: "" }])}>
-              + เพิ่มรอบ
-            </button>
+            {plan && !plan.ok && <div className="alert warn">{f.msg(plan.error)}</div>}
+            <button type="button" onClick={addRun}>{t("nj.addRun")}</button>
+            <p className="muted small">{t("nj.nightHint")}</p>
           </>
         )}
       </div>
-      <p className="muted">ข้อมูล Calibration (เวลาเริ่ม–เสร็จสิ้น) บันทึกในหน้าบันทึก GPS ของงานนี้</p>
+
+      <details className="card notes-box">
+        <summary>{t("nj.notes")}</summary>
+        <textarea rows={3} maxLength={2000} value={form.notes} onChange={(e) => set("notes", e.target.value)} />
+      </details>
+
       {err && <div className="alert bad">{err}</div>}
-      <button className="pri" disabled={busy}>บันทึกและไปหน้าบันทึก GPS</button>
+      <div className="actionbar">
+        <button className="big go" disabled={busy || !m}>
+          <span className="big-label">{t("nj.submit")}</span>
+          <span className="big-sub">{t("nj.calNote")}</span>
+        </button>
+      </div>
     </form>
   );
 }

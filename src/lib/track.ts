@@ -31,8 +31,9 @@ export function pendingPoints(ops: SyncOp[], roundId: string): TP[] {
   return decodeChunks(chunks);
 }
 
-/** แสดงผลรวมข้อมูลจากเซิร์ฟเวอร์ + รายการที่ยังรอส่ง (ทำเครื่องหมาย pending) */
-export function applyPending(s: Session, ops: SyncOp[]): Session {
+/** แสดงผลรวมข้อมูลจากเซิร์ฟเวอร์ + รายการที่ยังรอส่ง (mark = ทำเครื่องหมาย pending "รอซิงก์") */
+export function applyPending(s: Session, ops: SyncOp[], mark = true): Session {
+  const pending = mark ? true : undefined;
   const rounds = s.rounds.map((r) => ({ ...r }));
   const cals = s.calibrations.map((c) => ({ ...c }));
   const nextSeq = (xs: { seq: number }[]) => xs.reduce((m, x) => Math.max(m, x.seq), 0) + 1;
@@ -42,34 +43,34 @@ export function applyPending(s: Session, ops: SyncOp[]): Session {
         if (!rounds.some((r) => r.id === op.roundId))
           rounds.push({
             id: op.roundId, seq: nextSeq(rounds), topic: op.topic, plannedStart: null, plannedEnd: null, startedAt: null, endedAt: null,
-            startedBy: null, endedBy: null, pointCount: 0, distanceM: 0, lastT: null, pending: true,
+            startedBy: null, endedBy: null, pointCount: 0, distanceM: 0, lastT: null, pending,
           });
         break;
       case "round.start": {
         const r = rounds.find((x) => x.id === op.roundId);
-        if (r && r.startedAt == null) Object.assign(r, { startedAt: op.t, pending: true });
+        if (r && r.startedAt == null) Object.assign(r, { startedAt: op.t, pending });
         break;
       }
       case "round.end": {
         const r = rounds.find((x) => x.id === op.roundId);
-        if (r && r.endedAt == null) Object.assign(r, { endedAt: op.t, pending: true });
+        if (r && r.endedAt == null) Object.assign(r, { endedAt: op.t, pending });
         break;
       }
       case "chunk": {
         const r = rounds.find((x) => x.id === op.roundId);
-        if (r) Object.assign(r, { pointCount: r.pointCount + op.pts.length, pending: true });
+        if (r) Object.assign(r, { pointCount: r.pointCount + op.pts.length, pending });
         break;
       }
       case "cal.start":
         if (!cals.some((c) => c.id === op.calId))
           cals.push({
             id: op.calId, seq: nextSeq(cals), kind: op.kind, startedAt: op.t, endedAt: null, note: null,
-            createdBy: null, createdAt: op.t, updatedAt: null, pending: true,
+            createdBy: null, createdAt: op.t, updatedAt: null, pending,
           });
         break;
       case "cal.end": {
         const c = cals.find((x) => x.id === op.calId);
-        if (c && c.endedAt == null) Object.assign(c, { endedAt: op.t, pending: true });
+        if (c && c.endedAt == null) Object.assign(c, { endedAt: op.t, pending });
         break;
       }
     }

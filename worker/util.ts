@@ -1,6 +1,6 @@
 import type { Context } from "hono";
-import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
+import { pickLang, translate, type Lang, type Params, type SharedKey } from "../shared/i18n";
 
 export const now = () => Date.now();
 export const uid = () => crypto.randomUUID();
@@ -8,21 +8,36 @@ export const uid = () => crypto.randomUUID();
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const isUuid = (s: unknown): s is string => typeof s === "string" && UUID_RE.test(s);
 
-/** หยุดการทำงานและตอบกลับเป็น JSON { error, code, ...extra } */
-export function fail(status: ContentfulStatusCode, message: string, code?: string, extra?: Record<string, unknown>): never {
-  throw new HTTPException(status, {
-    res: Response.json({ error: message, code, ...extra }, { status }),
-  });
+/** ข้อผิดพลาดที่ตั้งใจส่งกลับให้ผู้ใช้ (แปลเป็นภาษาของผู้ใช้ตอนตอบกลับ) */
+export class AppError extends Error {
+  constructor(
+    public status: ContentfulStatusCode,
+    public key: SharedKey,
+    public params?: Params,
+    public extra?: Record<string, unknown>,
+    public code?: string,
+  ) {
+    super(key);
+  }
 }
+
+/** หยุดการทำงานและตอบกลับ { error: ข้อความตามภาษา, code, ...extra } */
+export function fail(status: ContentfulStatusCode, key: SharedKey, params?: Params, extra?: Record<string, unknown>, code?: string): never {
+  throw new AppError(status, key, params, extra, code);
+}
+
+/** ภาษาของผู้ใช้: header X-Lang (หน้าเว็บส่งมาทุกครั้ง) หรือ Accept-Language */
+export const langOf = (c: Context): Lang => pickLang(c.req.header("x-lang"), c.req.header("accept-language"));
+export const tr = (c: Context, key: SharedKey, params?: Params) => translate(langOf(c), key, params);
 
 export async function readJson(c: Context): Promise<Record<string, unknown>> {
   let body: unknown;
   try {
     body = await c.req.json();
   } catch {
-    fail(400, "ข้อมูลที่ส่งมาไม่ถูกต้อง");
+    fail(400, "err.badJson");
   }
-  if (!body || typeof body !== "object" || Array.isArray(body)) fail(400, "ข้อมูลที่ส่งมาไม่ถูกต้อง");
+  if (!body || typeof body !== "object" || Array.isArray(body)) fail(400, "err.badJson");
   return body as Record<string, unknown>;
 }
 
@@ -35,7 +50,6 @@ export function str(v: unknown, max = 500): string | null {
 
 export const qs = (n: number) => Array(n).fill("?").join(",");
 
-export const LOCKED_MSG = "งานนี้ผ่าน QC แล้ว ข้อมูลถูกล็อก (ให้ผู้ตรวจ QC เปลี่ยนสถานะก่อนจึงจะแก้ไขได้)";
 export const clampInt = (v: unknown, min: number, max: number, dflt: number) => {
   const n = Math.trunc(Number(v));
   return Number.isFinite(n) && n >= min ? Math.min(n, max) : dflt;

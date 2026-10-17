@@ -1,12 +1,14 @@
 import { useState } from "react";
 import { Navigate, useNavigate, useSearchParams } from "react-router";
 import type { Me } from "../../shared/types";
+import { LangSwitch, useI18n } from "../i18n";
 import { api, errMsg } from "../lib/api";
 import { useAuth } from "../lib/auth";
-import { Spinner } from "../components/ui";
+import { Brand, Spinner } from "../components/ui";
 
 export default function Login() {
   const { loading, user, setupRequired, signedIn } = useAuth();
+  const { t } = useI18n();
   const [sp] = useSearchParams();
   const nav = useNavigate();
   const [username, setUsername] = useState("");
@@ -37,20 +39,24 @@ export default function Login() {
 
   return (
     <div className="auth-page">
+      <div className="auth-top">
+        <Brand light />
+        <LangSwitch className="dark" />
+      </div>
       <form className="card auth-card" onSubmit={submit}>
-        <h1>Mapping Log</h1>
-        <p className="muted">ระบบบันทึกการวิ่งรถ Mapping</p>
+        <h1>{t("login.submit")}</h1>
+        <p className="muted">{t("login.subtitle")}</p>
         <label className="field">
-          <span>ชื่อผู้ใช้</span>
+          <span>{t("login.username")}</span>
           <input autoComplete="username" autoCapitalize="none" required value={username} onChange={(e) => setUsername(e.target.value)} />
         </label>
         <label className="field">
-          <span>รหัสผ่าน</span>
+          <span>{t("login.password")}</span>
           <input type="password" autoComplete="current-password" required value={password} onChange={(e) => setPassword(e.target.value)} />
         </label>
         {err && <div className="alert bad">{err}</div>}
-        <button className="pri wide" disabled={busy}>{busy ? "กำลังเข้าสู่ระบบ…" : "เข้าสู่ระบบ"}</button>
-        <p className="muted small">ลืมรหัสผ่าน? ติดต่อผู้ดูแลระบบเพื่อตั้งรหัสใหม่</p>
+        <button className="pri wide big-ish" disabled={busy}>{busy ? t("login.busy") : t("login.submit")}</button>
+        <p className="muted small">{t("login.forgot")}</p>
       </form>
     </div>
   );

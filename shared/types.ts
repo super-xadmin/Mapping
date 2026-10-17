@@ -115,7 +115,10 @@ export type SyncOp = { id: string; sessionId: string } & OpBody;
 export interface SyncResult {
   id: string;
   ok: boolean;
+  /** ข้อความตามภาษาของผู้ส่ง */
   error?: string;
+  /** key ของข้อความ (หน้าเว็บใช้แปลใหม่เมื่อเปลี่ยนภาษา) */
+  code?: string;
 }
 
 export const SYNC_MAX_OPS = 10; // จำนวนรายการต่อการส่ง 1 ครั้ง (D1 แผนฟรีจำกัด 50 query ต่อคำขอ)

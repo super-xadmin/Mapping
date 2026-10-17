@@ -1,3 +1,5 @@
+import { translate, type Lang } from "./i18n";
+
 /** ระยะทางระหว่าง 2 พิกัด (เมตร) */
 export function haversine(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6_371_000;
@@ -14,4 +16,5 @@ export function pathDistance(pts: { lat: number; lng: number }[]): number {
   return d;
 }
 
-export const fmtKm = (m: number | null | undefined) => (m == null ? "-" : `${(m / 1000).toFixed(2)} กม.`);
+export const fmtKm = (m: number | null | undefined, lang: Lang = "th") =>
+  m == null ? "-" : translate(lang, "unit.km", { v: (m / 1000).toFixed(2) });

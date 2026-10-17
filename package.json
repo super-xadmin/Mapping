@@ -1,6 +1,6 @@
 {
   "name": "mapping-log",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,6 +13,8 @@
     "deploy": "npm run build && wrangler d1 migrations apply mapping-log --remote && wrangler deploy"
   },
   "dependencies": {
+    "@fontsource/poppins": "5.3.0",
+    "@fontsource/prompt": "5.3.0",
     "hono": "4.13.13",
     "leaflet": "1.9.4",
     "react": "19.3.1",

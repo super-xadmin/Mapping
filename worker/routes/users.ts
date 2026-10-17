@@ -33,12 +33,12 @@ userRoutes.post("/", async (c) => {
   const b = await readJson(c);
   const DB = c.env.DB;
   const username = str(b.username, 32);
-  if (!username || !USERNAME_RE.test(username)) fail(400, "ชื่อผู้ใช้ต้องเป็น a-z, 0-9, . _ - ยาว 3–32 ตัว");
-  const displayName = str(b.displayName, 100) ?? fail(400, "กรุณากรอกชื่อที่แสดง");
-  if (!isRole(b.role)) fail(400, "สิทธิ์ไม่ถูกต้อง");
+  if (!username || !USERNAME_RE.test(username)) fail(400, "err.username");
+  const displayName = str(b.displayName, 100) ?? fail(400, "err.displayName");
+  if (!isRole(b.role)) fail(400, "err.role");
   const problem = passwordProblem(b.password, username);
-  if (problem) fail(400, problem);
-  if (await DB.prepare("SELECT 1 FROM users WHERE username = ?").bind(username).first()) fail(409, "ชื่อผู้ใช้นี้มีอยู่แล้ว");
+  if (problem) fail(400, problem.key, problem.params);
+  if (await DB.prepare("SELECT 1 FROM users WHERE username = ?").bind(username).first()) fail(409, "err.usernameTaken");
   const id = uid();
   const hash = await hashPassword(b.password as string, iterationsFor(c.env));
   await DB.batch([
@@ -57,7 +57,7 @@ userRoutes.patch("/:id", async (c) => {
   const b = await readJson(c);
   const DB = c.env.DB;
   const target = await DB.prepare(`SELECT ${COLS} FROM users WHERE id = ?`).bind(id).first<UserDb>();
-  if (!target) fail(404, "ไม่พบผู้ใช้");
+  if (!target) fail(404, "err.userNotFound");
 
   const sets: string[] = [];
   const vals: unknown[] = [];
@@ -65,16 +65,16 @@ userRoutes.patch("/:id", async (c) => {
   const extra: D1PreparedStatement[] = [];
 
   if (b.displayName !== undefined) {
-    const v = str(b.displayName, 100) ?? fail(400, "กรุณากรอกชื่อที่แสดง");
+    const v = str(b.displayName, 100) ?? fail(400, "err.displayName");
     sets.push("display_name = ?"); vals.push(v); changes.displayName = v;
   }
   const newRole = b.role !== undefined ? b.role : target.role;
-  if (!isRole(newRole)) fail(400, "สิทธิ์ไม่ถูกต้อง");
+  if (!isRole(newRole)) fail(400, "err.role");
   const newActive = b.active !== undefined ? !!b.active : !!target.active;
-  if (id === me.id && (newRole !== target.role || !newActive)) fail(400, "เปลี่ยนสิทธิ์หรือปิดบัญชีของตัวเองไม่ได้");
+  if (id === me.id && (newRole !== target.role || !newActive)) fail(400, "err.selfChange");
   if (target.role === "admin" && target.active && (newRole !== "admin" || !newActive)) {
     const others = await DB.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND active = 1 AND id != ?").bind(id).first<number>("n");
-    if (!others) fail(400, "ต้องมีผู้ดูแลระบบที่ใช้งานอยู่อย่างน้อย 1 คน");
+    if (!others) fail(400, "err.lastAdmin");
   }
   if (newRole !== target.role) { sets.push("role = ?"); vals.push(newRole); changes.role = newRole; }
   if (newActive !== !!target.active) {
@@ -83,7 +83,7 @@ userRoutes.patch("/:id", async (c) => {
   }
   if (b.password !== undefined) {
     const problem = passwordProblem(b.password, target.username);
-    if (problem) fail(400, problem);
+    if (problem) fail(400, problem.key, problem.params);
     sets.push("password_hash = ?", "must_change_password = 1", "failed_logins = 0", "locked_until = NULL");
     vals.push(await hashPassword(b.password as string, iterationsFor(c.env)));
     changes.passwordReset = true;

@@ -6,7 +6,7 @@ import { calComplete } from "../../shared/types";
 import type { AppEnv } from "../env";
 import { requireRole, requireUser } from "../auth";
 import { CAL_SELECT, ROUND_SELECT, SESSION_SELECT, toSession, type CalDb, type RoundDb, type SessionDb } from "../rows";
-import { LOCKED_MSG, audit, clampInt, fail, isUuid, now, readJson, str, uid } from "../util";
+import { audit, clampInt, fail, isUuid, now, readJson, str, tr, uid } from "../util";
 
 export const sessionRoutes = new Hono<AppEnv>();
 sessionRoutes.use("*", requireUser);
@@ -21,7 +21,7 @@ async function loadSession(DB: D1Database, id: string) {
     DB.prepare(`${CAL_SELECT} WHERE c.session_id = ? ORDER BY c.seq`).bind(id),
   ]);
   const row = s.results[0] as SessionDb | undefined;
-  if (!row) fail(404, "ไม่พบงานนี้ (อาจถูกลบไปแล้ว)");
+  if (!row) fail(404, "err.sessionNotFound");
   return toSession(row, r.results as RoundDb[], c.results as CalDb[]);
 }
 
@@ -33,9 +33,9 @@ async function checkRefs(DB: D1Database, driverId: string, vehicleId: string, pr
   )
     .bind(driverId, vehicleId, projectId)
     .first<{ d: number | null; v: number | null; p: number | null }>();
-  if (!chk?.d) fail(400, "ไม่พบคนขับนี้ หรือถูกปิดใช้งานแล้ว");
-  if (!chk.v) fail(400, "ไม่พบรถคันนี้ หรือถูกปิดใช้งานแล้ว");
-  if (!chk.p) fail(400, "ไม่พบโปรเจกต์นี้ หรือถูกปิดใช้งานแล้ว");
+  if (!chk?.d) fail(400, "err.driverInvalid");
+  if (!chk.v) fail(400, "err.vehicleInvalid");
+  if (!chk.p) fail(400, "err.projectInvalid");
 }
 
 // ---------- รายการงาน + ตัวกรอง ----------
@@ -83,25 +83,25 @@ sessionRoutes.post("/", requireRole(can.record), async (c) => {
   const b = await readJson(c);
   const DB = c.env.DB;
   const user = c.get("user");
-  const title = str(b.title, 200) ?? fail(400, "กรุณากรอกชื่องาน");
-  if (!isDateStr(b.workDate)) fail(400, "วันที่ไม่ถูกต้อง");
+  const title = str(b.title, 200) ?? fail(400, "err.titleRequired");
+  if (!isDateStr(b.workDate)) fail(400, "err.badDate");
   const workDate = b.workDate;
   const driverId = str(b.driverId, 64), vehicleId = str(b.vehicleId, 64), projectId = str(b.projectId, 64);
-  if (!driverId || !vehicleId || !projectId) fail(400, "กรุณาเลือกคนขับ รถ และโปรเจกต์");
+  if (!driverId || !vehicleId || !projectId) fail(400, "err.refsRequired");
   await checkRefs(DB, driverId, vehicleId, projectId);
 
   const split = !!b.splitRounds;
   let rounds: { topic: string; ps: number | null; pe: number | null }[];
   if (split) {
     const raw = Array.isArray(b.rounds) ? (b.rounds as Record<string, unknown>[]) : [];
-    if (raw.length > MAX_ROUNDS) fail(400, `แบ่งได้สูงสุด ${MAX_ROUNDS} รอบ`);
+    if (raw.length > MAX_ROUNDS) fail(400, "err.maxRounds", { n: MAX_ROUNDS });
     const input = raw.map((r) => ({
       topic: String(r?.topic ?? "").trim().slice(0, 200),
       plannedStart: String(r?.plannedStart ?? ""),
       plannedEnd: String(r?.plannedEnd ?? ""),
     }));
     const res = resolvePlannedRounds(workDate, input);
-    if (!res.ok) fail(400, res.error);
+    if (!res.ok) fail(400, res.error.key, res.error.params);
     rounds = input.map((r, i) => ({ topic: r.topic, ps: res.times[i][0], pe: res.times[i][1] }));
   } else {
     rounds = [{ topic: title, ps: null, pe: null }];
@@ -134,10 +134,10 @@ sessionRoutes.patch("/:id", requireRole(can.record), async (c) => {
   const s = await DB.prepare("SELECT title, notes, driver_id, vehicle_id, project_id, qc_status FROM mapping_sessions WHERE id = ?")
     .bind(id)
     .first<{ title: string; notes: string | null; driver_id: string; vehicle_id: string; project_id: string; qc_status: string }>();
-  if (!s) fail(404, "ไม่พบงานนี้");
-  if (s.qc_status === "PASSED") fail(423, LOCKED_MSG, "locked");
+  if (!s) fail(404, "err.sessionNotFound");
+  if (s.qc_status === "PASSED") fail(423, "err.locked", undefined, undefined, "locked");
   const next = {
-    title: b.title !== undefined ? str(b.title, 200) ?? fail(400, "กรุณากรอกชื่องาน") : s.title,
+    title: b.title !== undefined ? str(b.title, 200) ?? fail(400, "err.titleRequired") : s.title,
     notes: b.notes !== undefined ? str(b.notes, 2000) : s.notes,
     driver_id: b.driverId !== undefined ? String(b.driverId) : s.driver_id,
     vehicle_id: b.vehicleId !== undefined ? String(b.vehicleId) : s.vehicle_id,
@@ -162,7 +162,7 @@ sessionRoutes.delete("/:id", requireRole(can.admin), async (c) => {
   const id = c.req.param("id");
   const DB = c.env.DB;
   const s = await DB.prepare("SELECT title, work_date FROM mapping_sessions WHERE id = ?").bind(id).first<{ title: string; work_date: string }>();
-  if (!s) fail(404, "ไม่พบงานนี้");
+  if (!s) fail(404, "err.sessionNotFound");
   await DB.batch([
     audit(DB, c.get("user"), "session.delete", id, { title: s.title, workDate: s.work_date }),
     DB.prepare("DELETE FROM track_chunks WHERE round_id IN (SELECT id FROM rounds WHERE session_id = ?)").bind(id),
@@ -177,16 +177,17 @@ sessionRoutes.delete("/:id", requireRole(can.admin), async (c) => {
 sessionRoutes.patch("/:id/qc", requireRole(can.qc), async (c) => {
   const id = c.req.param("id");
   const b = await readJson(c);
-  if (!isQc(b.status)) fail(400, "สถานะไม่ถูกต้อง");
+  if (!isQc(b.status)) fail(400, "err.badStatus");
   const note = str(b.note, 1000);
   const DB = c.env.DB;
   const s = await loadSession(DB, id);
   if (b.status === "PASSED") {
     const problems: string[] = [];
-    if (!calComplete(s.calibrations)) problems.push("ยังไม่มีข้อมูล Calibration ที่มีทั้งเวลาเริ่มและเวลาเสร็จ");
-    if (s.rounds.some((r) => r.startedAt != null && r.endedAt == null)) problems.push("ยังมีรอบที่กำลังวิ่งอยู่ (ยังไม่ได้กดจบรอบ)");
-    if (!s.rounds.some((r) => r.endedAt != null)) problems.push("ยังไม่มีรอบที่วิ่งเสร็จ");
-    if (problems.length) fail(400, `ยังให้ผ่าน QC ไม่ได้: ${problems.join(" / ")}`, "qc_blocked", { problems });
+    if (!calComplete(s.calibrations)) problems.push(tr(c, "qcp.noCal"));
+    if (s.calibrations.some((x) => x.startedAt != null && x.endedAt == null)) problems.push(tr(c, "qcp.calOpen"));
+    if (s.rounds.some((r) => r.startedAt != null && r.endedAt == null)) problems.push(tr(c, "qcp.running"));
+    if (!s.rounds.some((r) => r.endedAt != null)) problems.push(tr(c, "qcp.noEnded"));
+    if (problems.length) fail(400, "err.qcBlocked", undefined, { problems }, "qc_blocked");
   }
   const user = c.get("user");
   await DB.batch([
@@ -253,11 +254,11 @@ sessionRoutes.post("/:id/calibrations", requireRole(can.record), async (c) => {
   const DB = c.env.DB;
   const user = c.get("user");
   const s = await DB.prepare("SELECT work_date, qc_status FROM mapping_sessions WHERE id = ?").bind(id).first<{ work_date: string; qc_status: string }>();
-  if (!s) fail(404, "ไม่พบงานนี้");
-  if (s.qc_status === "PASSED") fail(423, LOCKED_MSG, "locked");
-  if (!isCalKind(b.kind)) fail(400, "ประเภท Calibration ไม่ถูกต้อง");
+  if (!s) fail(404, "err.sessionNotFound");
+  if (s.qc_status === "PASSED") fail(423, "err.locked", undefined, undefined, "locked");
+  if (!isCalKind(b.kind)) fail(400, "err.calKind");
   const r = resolveCalTimes(s.work_date, String(b.start ?? ""), b.end ? String(b.end) : null, !!b.startNextDay);
-  if (!r.ok) fail(400, r.error);
+  if (!r.ok) fail(400, r.error.key, r.error.params);
   const note = str(b.note, 500);
   const calId = uid();
   await DB.batch([

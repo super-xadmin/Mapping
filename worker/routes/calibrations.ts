@@ -4,7 +4,7 @@ import { can, isCalKind, type CalKind } from "../../shared/labels";
 import { resolveCalTimes } from "../../shared/time";
 import type { AppEnv } from "../env";
 import { requireRole, requireUser } from "../auth";
-import { LOCKED_MSG, audit, fail, now, readJson, str } from "../util";
+import { audit, fail, now, readJson, str } from "../util";
 
 type CalRow = {
   id: string; session_id: string; seq: number; kind: CalKind; started_at: number | null; ended_at: number | null;
@@ -21,8 +21,8 @@ async function loadCal(DB: D1Database, id: string): Promise<CalRow> {
   )
     .bind(id)
     .first<CalRow>();
-  if (!cal) fail(404, "ไม่พบรายการ Calibration");
-  if (cal.qc_status === "PASSED") fail(423, LOCKED_MSG, "locked");
+  if (!cal) fail(404, "err.calNotFound");
+  if (cal.qc_status === "PASSED") fail(423, "err.locked", undefined, undefined, "locked");
   return cal;
 }
 
@@ -32,9 +32,9 @@ calRoutes.patch("/:id", async (c) => {
   const DB = c.env.DB;
   const cal = await loadCal(DB, c.req.param("id"));
   const b = await readJson(c);
-  if (!isCalKind(b.kind)) fail(400, "ประเภท Calibration ไม่ถูกต้อง");
+  if (!isCalKind(b.kind)) fail(400, "err.calKind");
   const r = resolveCalTimes(cal.work_date, String(b.start ?? ""), b.end ? String(b.end) : null, !!b.startNextDay);
-  if (!r.ok) fail(400, r.error);
+  if (!r.ok) fail(400, r.error.key, r.error.params);
   const note = str(b.note, 500);
   await DB.batch([
     DB.prepare("UPDATE calibrations SET kind = ?, started_at = ?, ended_at = ?, note = ?, updated_at = ? WHERE id = ?").bind(

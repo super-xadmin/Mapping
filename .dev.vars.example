@@ -1,0 +1,2 @@
+# คัดลอกเป็นไฟล์ .dev.vars สำหรับรันในเครื่อง (ห้าม commit ไฟล์ .dev.vars)
+SETUP_KEY=dev-setup-key

@@ -1,8 +1,9 @@
 import { useEffect, useRef } from "react";
 import L from "leaflet";
+import { useI18n } from "../i18n";
 
 export type MapTrack = { id: string; label: string; color: string; points: [number, number][]; version?: number };
-export const COLORS = ["#1f6feb", "#d1242f", "#1a7f37", "#8250df", "#bf8700", "#0a7ea4", "#cf222e", "#57606a"];
+export const COLORS = ["#1C8CC9", "#E5484D", "#2E9E6B", "#7C5CD6", "#D98A00", "#1C3564", "#D6409F", "#5B6478"];
 
 type Props = {
   tracks: MapTrack[];
@@ -15,6 +16,7 @@ type Props = {
 };
 
 export default function TrackMap({ tracks, marker, follow, fitKey, height = 480 }: Props) {
+  const startText = useI18n().t("rec.startPoint");
   const el = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const lines = useRef(new Map<string, { line: L.Polyline; start: L.CircleMarker }>());
@@ -51,13 +53,14 @@ export default function TrackMap({ tracks, marker, follow, fitKey, height = 480 
         const line = L.polyline([], { color: t.color, weight: 5, opacity: 0.85 }).addTo(map);
         line.bindTooltip(t.label, { sticky: true });
         const start = L.circleMarker([0, 0], { radius: 5, color: t.color, fillColor: "#fff", fillOpacity: 1, weight: 3 });
-        start.bindTooltip(`${t.label} — จุดเริ่ม`);
+        start.bindTooltip("");
         item = { line, start };
         lines.current.set(t.id, item);
       }
       item.line.setLatLngs(t.points);
       item.line.setStyle({ color: t.color });
       item.line.setTooltipContent(t.label);
+      item.start.setTooltipContent(`${t.label} — ${startText}`);
       if (t.points.length) {
         item.start.setLatLng(t.points[0]).setStyle({ color: t.color });
         if (!map.hasLayer(item.start)) item.start.addTo(map);
@@ -70,7 +73,7 @@ export default function TrackMap({ tracks, marker, follow, fitKey, height = 480 
         lines.current.delete(id);
       }
     }
-  }, [tracks]);
+  }, [tracks, startText]);
 
   // ซูมให้เห็นทั้งหมด
   useEffect(() => {
@@ -93,7 +96,7 @@ export default function TrackMap({ tracks, marker, follow, fitKey, height = 480 
       return;
     }
     if (!markerRef.current) {
-      markerRef.current = L.circleMarker([mLat, mLng], { radius: 9, color: "#fff", weight: 3, fillColor: "#d1242f", fillOpacity: 1 }).addTo(map);
+      markerRef.current = L.circleMarker([mLat, mLng], { radius: 9, color: "#fff", weight: 3, fillColor: "#E5484D", fillOpacity: 1 }).addTo(map);
     } else markerRef.current.setLatLng([mLat, mLng]);
     if (follow) map.setView([mLat, mLng], Math.max(map.getZoom(), 16), { animate: false });
   }, [mLat, mLng, follow]);

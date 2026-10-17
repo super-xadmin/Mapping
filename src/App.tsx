@@ -1,13 +1,14 @@
 import type { ReactNode } from "react";
 import { Link, Navigate, NavLink, Outlet, Route, Routes, useLocation, useNavigate } from "react-router";
-import { ROLE_LABEL, can, type Role } from "../shared/labels";
+import { can, type Role } from "../shared/labels";
+import { LangSwitch, useI18n } from "./i18n";
 import { AuthProvider, useAuth } from "./lib/auth";
 import { api } from "./lib/api";
 import { syncStore } from "./lib/outbox";
 import { recStore } from "./lib/recorder";
 import { useStore } from "./lib/store";
 import SyncBar from "./components/SyncBar";
-import { ErrorBox, Spinner } from "./components/ui";
+import { Brand, ErrorBox, Menu, Spinner } from "./components/ui";
 import Login from "./pages/Login";
 import Setup from "./pages/Setup";
 import Account from "./pages/Account";
@@ -32,12 +33,19 @@ function Guard({ children }: { children: ReactNode }) {
 
 function RoleGate({ need, children }: { need: (r: Role) => boolean; children: ReactNode }) {
   const { user } = useAuth();
+  const { t } = useI18n();
   if (user && need(user.role)) return <>{children}</>;
-  return <div className="card">บัญชีของคุณไม่มีสิทธิ์เข้าหน้านี้</div>;
+  return <div className="card">{t("c.noPermission")}</div>;
+}
+
+function NotFound() {
+  const { t } = useI18n();
+  return <div className="card">{t("c.notFoundPage")} — <Link to="/">{t("c.goHome")}</Link></div>;
 }
 
 function Layout() {
   const { user, offline, signedOut } = useAuth();
+  const { t } = useI18n();
   const rec = useStore(recStore);
   const sync = useStore(syncStore);
   const loc = useLocation();
@@ -47,8 +55,8 @@ function Layout() {
   const recSession = (rec.active ?? rec.cal)?.sessionId;
 
   async function logout() {
-    if (rec.active) return alert("กรุณาจบรอบที่กำลังบันทึก GPS ก่อนออกจากระบบ");
-    if (sync.pending && !confirm(`ยังมีข้อมูลรอส่ง ${sync.pending} รายการ\nข้อมูลยังเก็บอยู่ในเครื่องนี้ และจะส่งเมื่อเข้าสู่ระบบอีกครั้ง\n\nต้องการออกจากระบบหรือไม่?`)) return;
+    if (rec.active || rec.cal) return alert(t("logout.recording"));
+    if (sync.pending && !confirm(t("logout.pending", { n: sync.pending }))) return;
     await api("/auth/logout", { method: "POST" }).catch(() => {});
     signedOut();
     nav("/login", { replace: true });
@@ -57,26 +65,36 @@ function Layout() {
   return (
     <>
       <header className="top">
-        <Link to="/" className="brand">Mapping Log</Link>
-        <nav>
-          <NavLink to="/" end>ประวัติงาน</NavLink>
-          {can.record(user.role) && <NavLink to="/sessions/new">+ งานใหม่</NavLink>}
-          {can.admin(user.role) && <NavLink to="/admin">จัดการระบบ</NavLink>}
+        <Link to="/" className="brand" aria-label="Mapping Log"><Brand /></Link>
+        <nav className="desk-only">
+          <NavLink to="/" end>{t("nav.home")}</NavLink>
+          {can.record(user.role) && <NavLink to="/sessions/new">{t("nav.new")}</NavLink>}
+          {can.admin(user.role) && <NavLink to="/admin">{t("nav.admin")}</NavLink>}
         </nav>
-        <div className="me">
-          <NavLink to="/account" title="บัญชีของฉัน">{user.displayName}</NavLink>
-          <span className="role">{ROLE_LABEL[user.role]}</span>
-          <button className="link light" onClick={() => void logout()}>ออกจากระบบ</button>
-        </div>
+        <LangSwitch />
+        <Menu
+          className="usermenu"
+          title={t("nav.menu")}
+          label={<><span className="desk-only menu-name">{user.displayName}</span><span aria-hidden>☰</span></>}
+        >
+          <div className="menu-head">
+            <b>{user.displayName}</b>
+            <small>{user.username} · {t(`role.${user.role}`)}</small>
+          </div>
+          <Link className="menu-item" to="/">{t("nav.home")}</Link>
+          {can.record(user.role) && <Link className="menu-item" to="/sessions/new">{t("nav.new")}</Link>}
+          {can.admin(user.role) && <Link className="menu-item" to="/admin">{t("nav.admin")}</Link>}
+          <Link className="menu-item" to="/account">{t("nav.account")}</Link>
+          <button type="button" className="menu-item danger" onClick={() => void logout()}>{t("nav.logout")}</button>
+        </Menu>
       </header>
-      {offline && <div className="banner warn">ออฟไลน์ — แสดงข้อมูลที่จำไว้ในเครื่อง การบันทึก GPS ยังทำงานตามปกติ</div>}
+      {offline && <div className="banner warn">{t("c.offlineBanner")}</div>}
       {recSession && !onRecorder && (
-        <div className="banner rec">
-          <span className="dot live" /> {rec.active ? `กำลังบันทึก GPS: ${rec.active.label}` : "กำลังทำ Calibration"} —{" "}
-          <Link to={`/record/${recSession}`}>กลับไปหน้าบันทึก</Link>
-        </div>
+        <Link className="banner rec" to={`/record/${recSession}`}>
+          <span className="dot live" /> {rec.active ? t("c.recBanner", { label: rec.active.label }) : t("c.calBanner")} — <u>{t("c.backToRecorder")}</u>
+        </Link>
       )}
-      <main>
+      <main className={onRecorder ? "rec-main" : undefined}>
         {!onRecorder && <SyncBar compact />}
         <Outlet />
       </main>
@@ -97,7 +115,7 @@ export default function App() {
           <Route path="record/:id" element={<Recorder />} />
           <Route path="admin" element={<RoleGate need={can.admin}><Admin /></RoleGate>} />
           <Route path="account" element={<Account />} />
-          <Route path="*" element={<div className="card">ไม่พบหน้านี้ — <Link to="/">กลับหน้าแรก</Link></div>} />
+          <Route path="*" element={<NotFound />} />
         </Route>
       </Routes>
     </AuthProvider>

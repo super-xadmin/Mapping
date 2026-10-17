@@ -140,8 +140,8 @@ export const publicUser = (u: SessionUser) => ({
 
 export const requireUser: MiddlewareHandler<AppEnv> = async (c, next) => {
   const u = await loadUser(c);
-  if (!u) fail(401, "กรุณาเข้าสู่ระบบ", "unauthorized");
-  if (u.mustChangePassword) fail(403, "กรุณาเปลี่ยนรหัสผ่านก่อนใช้งาน", "must_change_password");
+  if (!u) fail(401, "err.unauthorized", undefined, undefined, "unauthorized");
+  if (u.mustChangePassword) fail(403, "err.mustChangePw", undefined, undefined, "must_change_password");
   c.set("user", u);
   await next();
 };
@@ -149,6 +149,6 @@ export const requireUser: MiddlewareHandler<AppEnv> = async (c, next) => {
 export const requireRole =
   (check: (r: Role) => boolean): MiddlewareHandler<AppEnv> =>
   async (c, next) => {
-    if (!check(c.get("user").role)) fail(403, "บัญชีของคุณไม่มีสิทธิ์ทำรายการนี้", "forbidden");
+    if (!check(c.get("user").role)) fail(403, "err.forbidden", undefined, undefined, "forbidden");
     await next();
   };

@@ -1,27 +1,92 @@
-// ประวัติงานทั้งหมด + ตัวกรอง + export สรุป
+// หน้าแรก: ปุ่มเริ่มงานใหม่ + งานวันนี้ (ทำต่อได้ในแตะเดียว) + ประวัติงานพร้อมตัวกรองแบบแตะ
 import { useCallback, useEffect, useState } from "react";
-import { Link, useSearchParams } from "react-router";
-import { fmtKm } from "../../shared/geo";
-import { CAL_LABEL, QC_LABEL, QC_STATUSES, can } from "../../shared/labels";
-import { fmtClock, fmtThaiDate } from "../../shared/time";
+import { Link, useNavigate, useSearchParams } from "react-router";
+import { QC_STATUSES, can } from "../../shared/labels";
+import { bkkDate } from "../../shared/time";
 import type { Master, Session, SessionList } from "../../shared/types";
+import { useI18n } from "../i18n";
 import { api, errMsg } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { exportSummaryCsv } from "../lib/exporters";
-import { CalBadge, ErrorBox, QcBadge } from "../components/ui";
+import { CalBadge, ErrorBox, QcBadge, useMedia } from "../components/ui";
 
 const PAGE = 50;
 const FILTER_KEYS = ["from", "to", "projectId", "driverId", "vehicleId", "qc", "cal", "q"] as const;
+const CHIPS = [
+  { id: "all", key: "c.all", qc: "", cal: "" },
+  { id: "pending", key: "home.chipPending", qc: "PENDING", cal: "" },
+  { id: "redo", key: "home.chipRedo", qc: "REDO", cal: "" },
+  { id: "nocal", key: "home.chipNoCal", qc: "", cal: "missing" },
+] as const;
+
+/** สรุปความคืบหน้าของรอบ */
+function progress(s: Session) {
+  const done = s.rounds.filter((r) => r.endedAt != null).length;
+  const running = s.rounds.some((r) => r.startedAt != null && r.endedAt == null);
+  const km = s.rounds.reduce((a, r) => a + r.distanceM, 0);
+  return { done, total: s.rounds.length, running, km };
+}
+
+function JobCard({ s, canRec, big = false }: { s: Session; canRec: boolean; big?: boolean }) {
+  const { t, f } = useI18n();
+  const nav = useNavigate();
+  const p = progress(s);
+  const recordable = canRec && s.qcStatus !== "PASSED";
+  return (
+    <div className={`job-card${big ? " big-card" : ""}`} onClick={() => nav(`/sessions/${s.id}`)} role="link" tabIndex={0}
+      onKeyDown={(e) => e.key === "Enter" && nav(`/sessions/${s.id}`)}>
+      <div className="row between m0">
+        <span className="muted small">{f.date(s.workDate)}</span>
+        <QcBadge status={s.qcStatus} />
+      </div>
+      <Link to={`/sessions/${s.id}`} className="job-title" onClick={(e) => e.stopPropagation()}>{s.title}</Link>
+      <div className="muted small">
+        {s.project.name}{s.project.area ? ` (${s.project.area})` : ""} · {s.driver.name} · {s.vehicle.plate}
+      </div>
+      <div className="row m0 small">
+        <CalBadge cals={s.calibrations} />
+        {p.running ? <span className="badge live-badge">● {t("home.running")}</span> : null}
+        <span className="muted">{t("home.runsDone", { done: p.done, total: p.total })} · {f.km(p.km)}</span>
+      </div>
+      {s.splitRounds && s.rounds.length > 1 && (
+        <ul className="mini-runs">
+          {s.rounds.map((r) => (
+            <li key={r.id}>
+              {r.seq}. {r.topic}:{" "}
+              {!r.startedAt ? (
+                <span className="muted">{t("home.notStarted")}</span>
+              ) : (
+                <>{f.clock(r.startedAt, s.workDate)}–{r.endedAt ? f.clock(r.endedAt, s.workDate) : <b className="live-text">{t("home.running")}</b>}</>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {recordable && big && (
+        <Link className="btn go wide" to={`/record/${s.id}`} onClick={(e) => e.stopPropagation()}>
+          ▶ {t("home.continue")}
+        </Link>
+      )}
+      {recordable && !big && (
+        <Link className="small" to={`/record/${s.id}`} onClick={(e) => e.stopPropagation()}>{t("home.continue")} →</Link>
+      )}
+    </div>
+  );
+}
 
 export default function Dashboard() {
   const { user } = useAuth();
+  const { lang, t, f } = useI18n();
+  const mobile = useMedia("(max-width: 720px)");
   const [sp, setSp] = useSearchParams();
   const [master, setMaster] = useState<Master | null>(null);
   const [list, setList] = useState<Session[]>([]);
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
+  const [showFilters, setShowFilters] = useState(false);
   const query = sp.toString();
+  const canRec = !!user && can.record(user.role);
 
   useEffect(() => {
     api<Master>("/master").then(setMaster).catch(() => {});
@@ -60,131 +125,175 @@ export default function Dashboard() {
     }
     setSp(next);
   }
+  function chip(c: (typeof CHIPS)[number]) {
+    const next = new URLSearchParams(sp);
+    next.delete("qc");
+    next.delete("cal");
+    if (c.qc) next.set("qc", c.qc);
+    if (c.cal) next.set("cal", c.cal);
+    setSp(next);
+  }
 
-  const f = (k: string) => sp.get(k) ?? "";
-  const wide = typeof window !== "undefined" && window.matchMedia("(min-width: 721px)").matches;
-  const activeFilters = FILTER_KEYS.filter((k) => sp.get(k)).length;
+  const fv = (k: string) => sp.get(k) ?? "";
+  const activeChip = CHIPS.find((c) => c.qc === fv("qc") && c.cal === fv("cal"))?.id ?? "";
+  const advanced = FILTER_KEYS.filter((k) => k !== "qc" && k !== "cal" && sp.get(k)).length;
+  const filtered = FILTER_KEYS.some((k) => sp.get(k));
+  const today = bkkDate();
+  const todays = filtered ? [] : list.filter((s) => s.workDate === today);
+  const history = filtered ? list : list.filter((s) => s.workDate !== today);
+  const inactive = t("c.inactiveSuffix");
+
   return (
     <>
-      <details className="card filter-box" open={wide || FILTER_KEYS.some((k) => sp.get(k))}>
-      <summary>ตัวกรอง{activeFilters ? ` (${activeFilters})` : ""}</summary>
-      <form className="filters" onSubmit={applyFilters} key={query}>
-        <label className="field"><span>ตั้งแต่วันที่</span><input type="date" name="from" defaultValue={f("from")} /></label>
-        <label className="field"><span>ถึงวันที่</span><input type="date" name="to" defaultValue={f("to")} /></label>
-        <label className="field">
-          <span>โปรเจกต์</span>
-          <select name="projectId" defaultValue={f("projectId")}>
-            <option value="">ทั้งหมด</option>
-            {master?.projects.map((p) => <option key={p.id} value={p.id}>{p.name}{p.active ? "" : " (ปิดใช้งาน)"}</option>)}
-          </select>
-        </label>
-        <label className="field">
-          <span>คนขับ</span>
-          <select name="driverId" defaultValue={f("driverId")}>
-            <option value="">ทั้งหมด</option>
-            {master?.drivers.map((d) => <option key={d.id} value={d.id}>{d.name}{d.active ? "" : " (ปิดใช้งาน)"}</option>)}
-          </select>
-        </label>
-        <label className="field">
-          <span>รถ</span>
-          <select name="vehicleId" defaultValue={f("vehicleId")}>
-            <option value="">ทั้งหมด</option>
-            {master?.vehicles.map((v) => <option key={v.id} value={v.id}>{v.plate}{v.active ? "" : " (ปิดใช้งาน)"}</option>)}
-          </select>
-        </label>
-        <label className="field">
-          <span>สถานะ QC</span>
-          <select name="qc" defaultValue={f("qc")}>
-            <option value="">ทั้งหมด</option>
-            {QC_STATUSES.map((k) => <option key={k} value={k}>{QC_LABEL[k]}</option>)}
-          </select>
-        </label>
-        <label className="field">
-          <span>Calibration</span>
-          <select name="cal" defaultValue={f("cal")}>
-            <option value="">ทั้งหมด</option>
-            <option value="ok">ครบ</option>
-            <option value="missing">ยังไม่มี / ไม่ครบ</option>
-          </select>
-        </label>
-        <label className="field full"><span>ค้นหาชื่องาน / หัวข้อรอบ / หมายเหตุ</span><input name="q" defaultValue={f("q")} /></label>
-        <div className="row end">
-          <button className="pri">กรอง</button>
-          <button type="button" onClick={() => setSp(new URLSearchParams())}>ล้าง</button>
-        </div>
-      </form>
-      </details>
+      {canRec && (
+        <Link className="btn go start-btn" to="/sessions/new">＋ {t("home.start")}</Link>
+      )}
 
-      <div className="row between">
-        <h2 className="m0">ประวัติงาน Mapping</h2>
-        <div className="row">
-          {user && can.record(user.role) && <Link className="btn pri" to="/sessions/new">+ งานใหม่</Link>}
-          <button disabled={!list.length} onClick={() => exportSummaryCsv(list)}>Export สรุป (CSV)</button>
-        </div>
-      </div>
+      {todays.length > 0 && (
+        <section>
+          <h2 className="section-title">{t("home.today")} · {f.date(today)}</h2>
+          <div className="job-grid">
+            {todays.map((s) => <JobCard key={s.id} s={s} canRec={canRec} big />)}
+          </div>
+        </section>
+      )}
 
-      <ErrorBox error={err} onRetry={() => void load(0)} />
-      <div className="card table-wrap">
-        <table className="cards-on-mobile">
-          <thead>
-            <tr>
-              <th>วันที่</th><th>งาน</th><th>โปรเจกต์ / พื้นที่</th><th>คนขับ / ทีม</th><th>รถ / อุปกรณ์</th>
-              <th>Calibration</th><th>รอบ (เวลาจริง)</th><th>ระยะทาง</th><th>QC</th>
-            </tr>
-          </thead>
-          <tbody>
-            {!loading && !list.length && (
-              <tr><td colSpan={9} className="muted">ยังไม่มีข้อมูล{query ? "ตามตัวกรองนี้" : ""}</td></tr>
-            )}
-            {list.map((s) => (
-              <tr key={s.id}>
-                <td data-label="วันที่" className="nowrap">{fmtThaiDate(s.workDate)}</td>
-                <td data-label="งาน">
-                  <Link to={`/sessions/${s.id}`}><b>{s.title}</b></Link>
-                  {user && can.record(user.role) && s.qcStatus !== "PASSED" && (
-                    <div><Link className="small" to={`/record/${s.id}`}>บันทึก GPS →</Link></div>
-                  )}
-                </td>
-                <td data-label="โปรเจกต์">{s.project.name}<div className="muted small">{s.project.area}</div></td>
-                <td data-label="คนขับ">{s.driver.name}<div className="muted small">{s.driver.team}</div></td>
-                <td data-label="รถ">{s.vehicle.plate}<div className="muted small">{s.vehicle.equipment}</div></td>
-                <td data-label="Calibration">
-                  {s.calibrations.length ? (
-                    s.calibrations.map((c) => (
-                      <div key={c.id} className="small nowrap">
-                        {CAL_LABEL[c.kind]} {fmtClock(c.startedAt, s.workDate)}–{c.endedAt ? fmtClock(c.endedAt, s.workDate) : "…"}
-                      </div>
-                    ))
-                  ) : (
-                    <CalBadge cals={s.calibrations} />
-                  )}
-                </td>
-                <td data-label="รอบ">
-                  {s.rounds.map((r) => (
-                    <div key={r.id} className="small">
-                      {s.splitRounds ? `${r.seq}. ${r.topic}: ` : ""}
-                      {!r.startedAt ? (
-                        <span className="muted">ยังไม่เริ่ม</span>
-                      ) : (
-                        <>
-                          {fmtClock(r.startedAt, s.workDate)}–
-                          {r.endedAt ? fmtClock(r.endedAt, s.workDate) : <b className="live-text">กำลังวิ่ง</b>}
-                        </>
-                      )}
-                    </div>
-                  ))}
-                </td>
-                <td data-label="ระยะทาง" className="nowrap">{fmtKm(s.rounds.reduce((a, r) => a + r.distanceM, 0))}</td>
-                <td data-label="QC"><QcBadge status={s.qcStatus} /></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {loading && <div className="muted center pad">กำลังโหลด…</div>}
-        {hasMore && !loading && (
-          <div className="center pad"><button onClick={() => void load(list.length)}>โหลดเพิ่ม</button></div>
+      <section>
+        <div className="row between">
+          <h2 className="section-title m0">{t("home.history")}</h2>
+          <button className="small-btn" disabled={!list.length} onClick={() => exportSummaryCsv(list, lang)}>⬇ {t("home.exportCsv")}</button>
+        </div>
+        <div className="chips scroll-x">
+          {CHIPS.map((c) => (
+            <button key={c.id} type="button" className={`chip${activeChip === c.id ? " on" : ""}`} aria-pressed={activeChip === c.id} onClick={() => chip(c)}>
+              {t(c.key)}
+            </button>
+          ))}
+          <button type="button" className={`chip${showFilters || advanced ? " on-outline" : ""}`} aria-expanded={showFilters} onClick={() => setShowFilters(!showFilters)}>
+            🔍 {t("home.filters")}{advanced ? ` (${advanced})` : ""}
+          </button>
+        </div>
+
+        {showFilters && (
+          <form className="card filters" onSubmit={applyFilters} key={query}>
+            <label className="field"><span>{t("filter.from")}</span><input type="date" name="from" defaultValue={fv("from")} /></label>
+            <label className="field"><span>{t("filter.to")}</span><input type="date" name="to" defaultValue={fv("to")} /></label>
+            <label className="field">
+              <span>{t("col.project")}</span>
+              <select name="projectId" defaultValue={fv("projectId")}>
+                <option value="">{t("c.all")}</option>
+                {master?.projects.map((p) => <option key={p.id} value={p.id}>{p.name}{p.active ? "" : inactive}</option>)}
+              </select>
+            </label>
+            <label className="field">
+              <span>{t("col.driver")}</span>
+              <select name="driverId" defaultValue={fv("driverId")}>
+                <option value="">{t("c.all")}</option>
+                {master?.drivers.map((d) => <option key={d.id} value={d.id}>{d.name}{d.active ? "" : inactive}</option>)}
+              </select>
+            </label>
+            <label className="field">
+              <span>{t("col.vehicle")}</span>
+              <select name="vehicleId" defaultValue={fv("vehicleId")}>
+                <option value="">{t("c.all")}</option>
+                {master?.vehicles.map((v) => <option key={v.id} value={v.id}>{v.plate}{v.active ? "" : inactive}</option>)}
+              </select>
+            </label>
+            <label className="field">
+              <span>{t("filter.qc")}</span>
+              <select name="qc" defaultValue={fv("qc")}>
+                <option value="">{t("c.all")}</option>
+                {QC_STATUSES.map((k) => <option key={k} value={k}>{t(`qc.${k}`)}</option>)}
+              </select>
+            </label>
+            <label className="field">
+              <span>{t("filter.cal")}</span>
+              <select name="cal" defaultValue={fv("cal")}>
+                <option value="">{t("c.all")}</option>
+                <option value="ok">{t("filter.calOk")}</option>
+                <option value="missing">{t("filter.calMissing")}</option>
+              </select>
+            </label>
+            <label className="field full"><span>{t("filter.q")}</span><input name="q" defaultValue={fv("q")} /></label>
+            <div className="row end full">
+              <button className="pri">{t("filter.apply")}</button>
+              <button type="button" onClick={() => setSp(new URLSearchParams())}>{t("filter.clear")}</button>
+            </div>
+          </form>
         )}
-      </div>
+
+        <ErrorBox error={err} onRetry={() => void load(0)} />
+        {!loading && !history.length && !todays.length && (
+          <div className="card muted center">{filtered ? t("home.emptyFiltered") : t("home.empty")}</div>
+        )}
+
+        {mobile ? (
+          <div className="job-list">
+            {history.map((s) => <JobCard key={s.id} s={s} canRec={canRec} />)}
+          </div>
+        ) : (
+          history.length > 0 && (
+            <div className="card table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>{t("col.date")}</th><th>{t("col.job")}</th><th>{t("col.project")}</th><th>{t("col.driver")}</th><th>{t("col.vehicle")}</th>
+                    <th>{t("col.cal")}</th><th>{t("col.runs")}</th><th>{t("col.distance")}</th><th>{t("col.qc")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {history.map((s) => (
+                    <tr key={s.id}>
+                      <td className="nowrap">{f.date(s.workDate)}</td>
+                      <td>
+                        <Link to={`/sessions/${s.id}`}><b>{s.title}</b></Link>
+                        {canRec && s.qcStatus !== "PASSED" && (
+                          <div><Link className="small" to={`/record/${s.id}`}>{t("home.continue")} →</Link></div>
+                        )}
+                      </td>
+                      <td>{s.project.name}<div className="muted small">{s.project.area}</div></td>
+                      <td>{s.driver.name}<div className="muted small">{s.driver.team}</div></td>
+                      <td>{s.vehicle.plate}<div className="muted small">{s.vehicle.equipment}</div></td>
+                      <td>
+                        {s.calibrations.length ? (
+                          s.calibrations.map((c) => (
+                            <div key={c.id} className="small nowrap">
+                              {t(`cal.${c.kind}`)} {f.clock(c.startedAt, s.workDate)}–{c.endedAt ? f.clock(c.endedAt, s.workDate) : "…"}
+                            </div>
+                          ))
+                        ) : (
+                          <CalBadge cals={s.calibrations} />
+                        )}
+                      </td>
+                      <td>
+                        {s.rounds.map((r) => (
+                          <div key={r.id} className="small">
+                            {s.splitRounds ? `${r.seq}. ${r.topic}: ` : ""}
+                            {!r.startedAt ? (
+                              <span className="muted">{t("home.notStarted")}</span>
+                            ) : (
+                              <>
+                                {f.clock(r.startedAt, s.workDate)}–
+                                {r.endedAt ? f.clock(r.endedAt, s.workDate) : <b className="live-text">{t("home.running")}</b>}
+                              </>
+                            )}
+                          </div>
+                        ))}
+                      </td>
+                      <td className="nowrap">{f.km(s.rounds.reduce((a, r) => a + r.distanceM, 0))}</td>
+                      <td><QcBadge status={s.qcStatus} /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )
+        )}
+        {loading && <div className="muted center pad">{t("c.loading")}</div>}
+        {hasMore && !loading && (
+          <div className="center pad"><button onClick={() => void load(list.length)}>{t("c.loadMore")}</button></div>
+        )}
+      </section>
     </>
   );
 }

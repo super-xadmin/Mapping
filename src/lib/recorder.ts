@@ -17,12 +17,14 @@ const K_LAST = "mlog:last"; // จุดล่าสุดที่บันท�
 export type ActiveRound = { sessionId: string; roundId: string; startedAt: number; label: string };
 export type ActiveCal = { sessionId: string; calId: string; kind: CalKind; startedAt: number };
 export type Fix = { lat: number; lng: number; acc: number; spd: number | null; hdg: number | null; alt: number | null; t: number };
+/** สาเหตุที่ใช้ GPS ไม่ได้ (หน้าเว็บแปลเป็นข้อความตามภาษา: gps.<code>) */
+export type GpsErr = "denied" | "unavailable" | "timeout" | "unsupported";
 
 type RecState = {
   active: ActiveRound | null;
   cal: ActiveCal | null;
   pos: Fix | null;
-  gpsError: string | null;
+  gpsError: GpsErr | null;
   watching: boolean;
   wakeLock: boolean;
   dist: number;
@@ -80,20 +82,14 @@ function onFix(p: GeolocationPosition) {
 }
 
 function onError(e: GeolocationPositionError) {
-  const msg =
-    e.code === 1
-      ? "ไม่ได้รับอนุญาตให้ใช้ตำแหน่ง — กรุณาอนุญาต Location ให้เว็บนี้ในการตั้งค่าเบราว์เซอร์"
-      : e.code === 2
-        ? "หาตำแหน่งไม่ได้ (สัญญาณ GPS อ่อน)"
-        : "รอสัญญาณ GPS นานเกินไป กำลังลองใหม่…";
-  recStore.set({ gpsError: window.isSecureContext ? msg : `${msg} (ต้องเปิดเว็บผ่าน HTTPS)` });
+  recStore.set({ gpsError: e.code === 1 ? "denied" : e.code === 2 ? "unavailable" : "timeout" });
 }
 
 function ensureWatch() {
   const need = viewers > 0 || !!recStore.get().active;
   if (need && watchId == null) {
     if (!("geolocation" in navigator)) {
-      recStore.set({ gpsError: "อุปกรณ์หรือเบราว์เซอร์นี้ไม่รองรับ GPS" });
+      recStore.set({ gpsError: "unsupported" });
       return;
     }
     watchId = navigator.geolocation.watchPosition(onFix, onError, { enableHighAccuracy: true, maximumAge: 0, timeout: 30_000 });
@@ -200,6 +196,21 @@ export const recorder = {
     const a = recStore.get().active;
     if (!a) return;
     enqueue({ k: "round.end", sessionId: a.sessionId, roundId: a.roundId, t: Date.now() });
+    lsSet(K_ACTIVE, null);
+    setLast(null);
+    recStore.set({ active: null });
+    ensureWatch();
+  },
+
+  /** จบรอบที่ไม่ได้บันทึกอยู่บนเครื่องนี้ (เช่น เริ่มจากเครื่องอื่น หรือข้อมูลในเครื่องหาย) */
+  endRoundRemote(sessionId: string, roundId: string) {
+    if (recStore.get().active?.roundId === roundId) return recorder.endRound();
+    enqueue({ k: "round.end", sessionId, roundId, t: Date.now() });
+  },
+
+  /** หยุดบันทึกในเครื่อง โดยไม่ส่ง "จบรอบ" (รอบถูกจบจากเครื่องอื่นไปแล้ว) */
+  forgetRound(roundId: string) {
+    if (recStore.get().active?.roundId !== roundId) return;
     lsSet(K_ACTIVE, null);
     setLast(null);
     recStore.set({ active: null });

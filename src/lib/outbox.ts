@@ -1,6 +1,7 @@
 // คิวข้อมูลรอส่ง (outbox): ทุกการกระทำในภาคสนามเก็บลงเครื่องก่อน แล้วค่อยส่งขึ้นเซิร์ฟเวอร์
 // ถ้าเน็ตหลุด ข้อมูลยังอยู่ในเครื่อง และส่งซ้ำอัตโนมัติโดยไม่เกิดข้อมูลซ้ำ
 import { CHUNK_MAX_POINTS, SYNC_MAX_OPS, type PtArr, type SyncOp, type SyncResult } from "../../shared/types";
+import type { UiKey } from "../i18n";
 import { ApiError, api } from "./api";
 import { createStore, lsGet, lsSet, newId } from "./store";
 
@@ -11,13 +12,19 @@ const BASE_DELAY = 10_000;
 const MAX_DELAY = 120_000;
 
 type OpenChunk = { id: string; sessionId: string; roundId: string; t0: number; pts: PtArr[] };
-export type FailedOp = { k: string; sessionId: string; error: string; at: number; points?: number };
+/** รายการที่เซิร์ฟเวอร์ไม่รับ (code = key ของข้อความ ใช้แปลใหม่เมื่อเปลี่ยนภาษา) */
+export type FailedOp = { k: string; sessionId: string; error: string; code?: string; at: number; points?: number };
+/** ข้อผิดพลาดล่าสุด: key ของข้อความบนหน้าเว็บ หรือข้อความจากเซิร์ฟเวอร์ */
+export type SyncError = { key: UiKey } | { text: string; serverKey?: string; params?: Record<string, string | number> };
 
 type SyncState = {
+  /** รายการรอส่งทั้งหมด (รวมก้อนพิกัดที่กำลังเก็บ) */
   pending: number;
+  /** รายการที่ปิดก้อนแล้วรอส่ง (ไม่นับก้อนที่กำลังเก็บ) */
+  queued: number;
   syncing: boolean;
   lastOkAt: number | null;
-  lastError: string | null;
+  lastError: SyncError | null;
   authError: boolean;
   storageError: boolean;
   failed: FailedOp[];
@@ -28,6 +35,7 @@ let open: OpenChunk | null = lsGet<OpenChunk | null>(K_OPEN, null);
 
 export const syncStore = createStore<SyncState>({
   pending: ops.length + (open?.pts.length ? 1 : 0),
+  queued: ops.length,
   syncing: false,
   lastOkAt: null,
   lastError: null,
@@ -40,7 +48,7 @@ export const syncStore = createStore<SyncState>({
 export const syncEvents = new EventTarget();
 
 function counts() {
-  return { pending: ops.length + (open?.pts.length ? 1 : 0) };
+  return { pending: ops.length + (open?.pts.length ? 1 : 0), queued: ops.length };
 }
 
 function persist() {
@@ -79,12 +87,23 @@ export function addPoint(sessionId: string, roundId: string, t: number, v: [numb
   syncStore.set({ ...counts(), storageError: !ok });
 }
 
-/** รายการที่ยังไม่ได้ส่ง (รวมก้อนพิกัดที่กำลังเก็บ) */
-export function pendingOps(sessionId?: string): SyncOp[] {
-  const all: SyncOp[] = open?.pts.length
+/** รายการที่ยังไม่ได้ส่ง (includeOpen = รวมก้อนพิกัดที่กำลังเก็บ) */
+export function pendingOps(sessionId?: string, includeOpen = true): SyncOp[] {
+  const all: SyncOp[] = includeOpen && open?.pts.length
     ? [...ops, { id: open.id, sessionId: open.sessionId, k: "chunk", roundId: open.roundId, t0: open.t0, pts: open.pts }]
     : [...ops];
   return sessionId ? all.filter((o) => o.sessionId === sessionId) : all;
+}
+
+/**
+ * รายการที่เพิ่งส่งสำเร็จ (เก็บไว้ในหน่วยความจำสั้น ๆ) — ใช้แสดงผลต่อจนกว่าหน้าจอจะโหลดข้อมูลชุดใหม่จากเซิร์ฟเวอร์
+ * ไม่งั้นช่วงเสี้ยววินาทีหลังส่ง หน้าจอจะเห็นข้อมูลเก่า (เช่น รอบที่เพิ่งจบกลับเป็น "กำลังวิ่ง")
+ * ไม่รวมก้อนพิกัด เพราะการนับจุดซ้ำไม่ได้ (รายการอื่นใส่ซ้ำได้โดยไม่เปลี่ยนผล)
+ */
+let recent: { op: SyncOp; at: number }[] = [];
+const RECENT_MS = 10 * 60_000;
+export function recentlySent(sessionId: string, since: number): SyncOp[] {
+  return recent.filter((x) => x.op.sessionId === sessionId && x.at >= since).map((x) => x.op);
 }
 
 let syncing = false;
@@ -109,9 +128,11 @@ export async function syncNow(): Promise<void> {
       } catch (e) {
         const err = e instanceof ApiError ? e : new ApiError(String(e), 0);
         if (err.status === 401 || err.code === "must_change_password") {
-          syncStore.set({ authError: true, lastError: "กรุณาเข้าสู่ระบบใหม่ เพื่อส่งข้อมูลที่ค้างอยู่ในเครื่อง" });
+          syncStore.set({ authError: true, lastError: { key: "sync.errAuth" } });
         } else {
-          syncStore.set({ lastError: err.status === 0 ? "ออฟไลน์ — เก็บข้อมูลไว้ในเครื่องก่อน จะส่งอัตโนมัติเมื่อมีสัญญาณ" : err.message });
+          syncStore.set({
+            lastError: err.status === 0 ? { key: "sync.errOffline" } : { text: err.message, serverKey: err.key, params: err.params },
+          });
           delay = Math.min(delay * 2, MAX_DELAY);
         }
         break;
@@ -123,9 +144,17 @@ export async function syncNow(): Promise<void> {
         touched.add(op.sessionId);
         const r = byId.get(op.id);
         if (r && !r.ok)
-          failedNow.push({ k: op.k, sessionId: op.sessionId, error: r.error ?? "ไม่ทราบสาเหตุ", at: Date.now(), points: op.k === "chunk" ? op.pts.length : undefined });
+          failedNow.push({
+            k: op.k, sessionId: op.sessionId, error: r.error ?? "", code: r.code, at: Date.now(),
+            points: op.k === "chunk" ? op.pts.length : undefined,
+          });
       }
       ops = ops.filter((o) => !sent.has(o.id));
+      const doneAt = Date.now();
+      recent = [
+        ...recent.filter((x) => doneAt - x.at < RECENT_MS),
+        ...batch.filter((op) => op.k !== "chunk" && byId.get(op.id)?.ok).map((op) => ({ op, at: doneAt })),
+      ].slice(-300);
       if (failedNow.length) {
         const failed = [...failedNow, ...syncStore.get().failed].slice(0, 50);
         lsSet(K_FAILED, failed);

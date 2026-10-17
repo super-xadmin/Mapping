@@ -1,75 +1,93 @@
-// แปลงประวัติการใช้งานเป็นข้อความภาษาไทย
-import { CAL_LABEL, QC_LABEL, ROLE_LABEL, type CalKind, type QcStatus, type Role } from "../../shared/labels";
+// แปลงประวัติการใช้งานเป็นข้อความตามภาษาที่เลือก
+import { isCalKind, isQc, isRole, type MasterType } from "../../shared/labels";
 import type { AuditEntry } from "../../shared/types";
-import { fmtClock, fmtThaiDate } from "../../shared/time";
+import type { Formatters, TFn, UiKey } from "../i18n";
 
-const FIELD: Record<string, string> = {
-  title: "ชื่องาน", notes: "หมายเหตุ", driver_id: "คนขับ", vehicle_id: "รถ", project_id: "โปรเจกต์",
+const FIELD: Record<string, UiKey> = {
+  title: "au.fieldTitle", notes: "au.fieldNotes", driver_id: "au.fieldDriver", vehicle_id: "au.fieldVehicle", project_id: "au.fieldProject",
 };
+/** ข้อมูลเก่า (ก่อนมีหลายภาษา) เก็บชื่อประเภทเป็นภาษาไทย */
+const LEGACY_MASTER: Record<string, MasterType> = { คนขับ: "drivers", รถ: "vehicles", โปรเจกต์: "projects" };
 
 type D = Record<string, unknown>;
 const s = (v: unknown) => (v == null ? "" : String(v));
 
-export function describeAudit(e: AuditEntry, workDate?: string): string {
+export function describeAudit(e: AuditEntry, t: TFn, f: Formatters, workDate?: string): string {
   const d: D = e.detail ?? {};
-  const clock = (v: unknown) => fmtClock(typeof v === "number" ? v : null, workDate);
-  const kind = (v: unknown) => CAL_LABEL[v as CalKind] ?? s(v);
+  const clock = (v: unknown) => f.clock(typeof v === "number" ? v : null, workDate);
+  const kind = (v: unknown) => (isCalKind(v) ? t(`cal.${v}`) : s(v));
+  const qc = (v: unknown) => (isQc(v) ? t(`qc.${v}`) : s(v));
+  const role = (v: unknown) => (isRole(v) ? t(`role.${v}`) : s(v));
   const cal = (v: unknown) => {
     const x = (v ?? {}) as D;
-    return `${kind(x.kind)} ${clock(x.startedAt)}–${x.endedAt == null ? "ยังไม่เสร็จ" : clock(x.endedAt)}${x.note ? ` (${s(x.note)})` : ""}`;
+    return `${kind(x.kind)} ${clock(x.startedAt)}–${x.endedAt == null ? t("calf.notDone") : clock(x.endedAt)}${x.note ? ` (${s(x.note)})` : ""}`;
   };
-  const seq = d.seq ? ` ${s(d.seq)}` : "";
+  const run = d.seq ? t("au.runN", { n: s(d.seq) }) : t("au.run");
+  const masterType = (v: unknown) => {
+    const k = typeof v === "string" ? (v in LEGACY_MASTER ? LEGACY_MASTER[v] : v) : "";
+    return k === "drivers" || k === "vehicles" || k === "projects" ? t(`master.${k}`) : s(v);
+  };
+
   switch (e.action) {
     case "session.create":
-      return `สร้างงาน "${s(d.title)}"${d.splitRounds ? ` แบ่ง ${s(d.rounds)} รอบ` : ""}`;
+      return d.splitRounds
+        ? t("au.sessionCreateSplit", { title: s(d.title), n: s(d.rounds) })
+        : t("au.sessionCreate", { title: s(d.title) });
     case "session.update":
-      return `แก้ไขข้อมูลงาน (${Object.keys((d.changes as D) ?? {}).map((k) => FIELD[k] ?? k).join(", ")})`;
+      return t("au.sessionUpdate", {
+        fields: Object.keys((d.changes as D) ?? {})
+          .map((k) => (FIELD[k] ? t(FIELD[k]) : k))
+          .join(t("au.sep")),
+      });
     case "session.delete":
-      return `ลบงาน "${s(d.title)}" (${fmtThaiDate(s(d.workDate))})`;
+      return t("au.sessionDelete", { title: s(d.title), date: f.date(s(d.workDate)) });
     case "round.add":
-      return `เพิ่มรอบ: ${s(d.topic)}`;
+      return t("au.roundAdd", { topic: s(d.topic) });
     case "round.start":
-      return `เริ่มรอบ${seq}: ${s(d.topic)} เวลา ${clock(d.t)}`;
+      return t("au.roundStart", { run, topic: s(d.topic), t: clock(d.t) });
     case "round.end":
-      return `จบรอบ${seq}: ${s(d.topic)} เวลา ${clock(d.t)}`;
+      return t("au.roundEnd", { run, topic: s(d.topic), t: clock(d.t) });
     case "cal.start":
-      return `เริ่ม Calibration (${kind(d.kind)}) เวลา ${clock(d.t)}`;
+      return t("au.calStart", { kind: kind(d.kind), t: clock(d.t) });
     case "cal.end":
-      return `เสร็จสิ้น Calibration (${kind(d.kind)}) เวลา ${clock(d.t)}`;
+      return t("au.calEnd", { kind: kind(d.kind), t: clock(d.t) });
     case "cal.create":
-      return `เพิ่ม Calibration แบบกรอกเวลา: ${cal(d)}`;
+      return t("au.calCreate", { cal: cal(d) });
     case "cal.update":
-      return `แก้ไข Calibration ครั้งที่ ${s(d.seq)}: ${cal(d.before)} → ${cal(d.after)}`;
+      return t("au.calUpdate", { n: s(d.seq), before: cal(d.before), after: cal(d.after) });
     case "cal.delete":
-      return `ลบ Calibration ครั้งที่ ${s(d.seq)} (${cal(d.before)})`;
+      return t("au.calDelete", { n: s(d.seq), before: cal(d.before) });
     case "qc.update":
-      return `สถานะ QC: ${QC_LABEL[d.from as QcStatus] ?? s(d.from)} → ${QC_LABEL[d.to as QcStatus] ?? s(d.to)}${d.note ? ` — ${s(d.note)}` : ""}`;
+      return `${t("au.qcUpdate", { from: qc(d.from), to: qc(d.to) })}${d.note ? ` — ${s(d.note)}` : ""}`;
     case "auth.setup":
-      return `ตั้งค่าระบบครั้งแรก (ผู้ดูแล: ${s(d.username)})`;
+      return t("au.authSetup", { u: s(d.username) });
     case "auth.login":
-      return "เข้าสู่ระบบ";
+      return t("au.authLogin");
     case "auth.login_failed":
-      return `เข้าสู่ระบบไม่สำเร็จ (${s(d.username)})`;
+      return t("au.authFailed", { u: s(d.username) });
     case "auth.locked":
-      return `บัญชี ${s(d.username)} ถูกล็อกชั่วคราว (ใส่รหัสผ่านผิดหลายครั้ง)`;
+      return t("au.authLocked", { u: s(d.username) });
     case "auth.password_change":
-      return "เปลี่ยนรหัสผ่านของตัวเอง";
+      return t("au.authPassword");
     case "user.create":
-      return `สร้างผู้ใช้ ${s(d.username)} (${ROLE_LABEL[d.role as Role] ?? s(d.role)})`;
+      return t("au.userCreate", { u: s(d.username), role: role(d.role) });
     case "user.update": {
       const parts: string[] = [];
-      if (d.role) parts.push(`สิทธิ์ → ${ROLE_LABEL[d.role as Role] ?? s(d.role)}`);
-      if (d.active === false) parts.push("ปิดใช้งาน");
-      if (d.active === true) parts.push("เปิดใช้งาน");
-      if (d.passwordReset) parts.push("ตั้งรหัสผ่านใหม่");
-      if (d.unlocked) parts.push("ปลดล็อก");
-      if (d.displayName) parts.push(`ชื่อ → ${s(d.displayName)}`);
-      return `แก้ไขผู้ใช้ ${s(d.username)}${parts.length ? `: ${parts.join(", ")}` : ""}`;
+      if (d.role) parts.push(t("au.userRole", { role: role(d.role) }));
+      if (d.active === false) parts.push(t("au.userDisabled"));
+      if (d.active === true) parts.push(t("au.userEnabled"));
+      if (d.passwordReset) parts.push(t("au.userPwReset"));
+      if (d.unlocked) parts.push(t("au.userUnlocked"));
+      if (d.displayName) parts.push(t("au.userName", { name: s(d.displayName) }));
+      const head = t("au.userUpdate", { u: s(d.username) });
+      return parts.length ? `${head}: ${parts.join(t("au.sep"))}` : head;
     }
     case "master.create":
-      return `เพิ่ม${s(d.type)}: ${s(d.name)}${d.detail ? ` (${s(d.detail)})` : ""}`;
-    case "master.update":
-      return `แก้ไข${s(d.type)}: ${s(d.name)}${d.active === false ? " — ปิดใช้งาน" : d.active === true ? " — เปิดใช้งาน" : ""}`;
+      return `${t("au.masterCreate", { type: masterType(d.type), name: s(d.name) })}${d.detail ? ` (${s(d.detail)})` : ""}`;
+    case "master.update": {
+      const state = d.active === false ? ` — ${t("au.userDisabled")}` : d.active === true ? ` — ${t("au.userEnabled")}` : "";
+      return `${t("au.masterUpdate", { type: masterType(d.type), name: s(d.name) })}${state}`;
+    }
     default:
       return e.action;
   }
