@@ -13,7 +13,7 @@
       "binding": "DB",
       "database_name": "mapping-log",
       // ใส่ database_id ของคุณ (ได้จาก `npx wrangler d1 create mapping-log` หรือหน้า D1 ใน Cloudflare)
-      "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID",
+      "database_id": "bd0593ff-8bf6-45d8-8e35-096028fa785e",
       "migrations_dir": "migrations"
     }
   ],
