@@ -1,14 +1,15 @@
 // แก้ไข / ลบ Calibration (บันทึกประวัติค่าเดิม-ค่าใหม่ทุกครั้ง)
 import { Hono } from "hono";
-import { can, isCalKind, type CalKind } from "../../shared/labels";
+import { can, isCalKind, type CalKind, type Stage } from "../../shared/labels";
 import { resolveCalTimes } from "../../shared/time";
 import type { AppEnv } from "../env";
 import { requireRole, requireUser } from "../auth";
+import { STAGE_SQL, assertEditable } from "../rows";
 import { audit, fail, now, readJson, str } from "../util";
 
 type CalRow = {
   id: string; session_id: string; seq: number; kind: CalKind; started_at: number | null; ended_at: number | null;
-  note: string | null; work_date: string; qc_status: string;
+  note: string | null; work_date: string; stage: Stage;
 };
 
 export const calRoutes = new Hono<AppEnv>();
@@ -16,13 +17,13 @@ calRoutes.use("*", requireUser, requireRole(can.record));
 
 async function loadCal(DB: D1Database, id: string): Promise<CalRow> {
   const cal = await DB.prepare(
-    `SELECT c.id, c.session_id, c.seq, c.kind, c.started_at, c.ended_at, c.note, s.work_date, s.qc_status
+    `SELECT c.id, c.session_id, c.seq, c.kind, c.started_at, c.ended_at, c.note, s.work_date, ${STAGE_SQL} AS stage
      FROM calibrations c JOIN mapping_sessions s ON s.id = c.session_id WHERE c.id = ?`,
   )
     .bind(id)
     .first<CalRow>();
   if (!cal) fail(404, "err.calNotFound");
-  if (cal.qc_status === "PASSED") fail(423, "err.locked", undefined, undefined, "locked");
+  assertEditable(cal.stage);
   return cal;
 }
 

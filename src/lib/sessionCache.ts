@@ -15,9 +15,16 @@ export function readSession(id: string): CachedSession | null {
   const v = lsGet<unknown>(sessKey(id), null);
   if (!v || typeof v !== "object") return null;
   // รูปแบบเก่า (เวอร์ชันก่อน) เก็บ Session ตรง ๆ
-  if ("s" in v && "at" in v) return v as CachedSession;
-  if ("id" in v && "rounds" in v) return { at: 0, s: v as Session };
+  if ("s" in v && "at" in v) return { ...(v as CachedSession), s: upgrade((v as CachedSession).s) };
+  if ("id" in v && "rounds" in v) return { at: 0, s: upgrade(v as Session) };
   return null;
+}
+
+/** สำเนาที่บันทึกก่อน v3.2 ยังไม่มีขั้นของงาน (stage) — เดาจากสถานะ QC จนกว่าจะโหลดข้อมูลใหม่ได้ */
+function upgrade(s: Session): Session {
+  if (s.stage) return s;
+  const stage = s.qcStatus === "PASSED" ? "passed" : s.qcStatus === "REDO" ? "returned" : "open";
+  return { ...s, stage, submittedAt: null, submittedBy: null, submittedById: null, qcById: null };
 }
 
 export function saveSession(id: string, s: Session, at: number) {

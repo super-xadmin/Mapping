@@ -1,5 +1,5 @@
 // รูปแบบข้อมูลที่ส่งระหว่างหน้าเว็บกับ Worker
-import type { CalKind, QcStatus, Role } from "./labels";
+import type { CalKind, QcStatus, Role, Stage } from "./labels";
 
 export interface Me {
   id: string;
@@ -27,9 +27,11 @@ export interface UserRow {
   createdAt: number;
 }
 
-export interface Driver { id: string; name: string; team: string | null; active: boolean }
-export interface Vehicle { id: string; plate: string; equipment: string | null; active: boolean }
-export interface Project { id: string; name: string; area: string | null; active: boolean }
+/** ใครเพิ่มรายการข้อมูลหลัก (รายการที่เพิ่มก่อน v3.2 ไม่มีชื่อ) */
+interface MasterMeta { active: boolean; createdBy: string | null; createdAt: number }
+export interface Driver extends MasterMeta { id: string; name: string; team: string | null }
+export interface Vehicle extends MasterMeta { id: string; plate: string; equipment: string | null }
+export interface Project extends MasterMeta { id: string; name: string; area: string | null }
 export interface Master { drivers: Driver[]; vehicles: Vehicle[]; projects: Project[] }
 
 export interface Round {
@@ -68,9 +70,17 @@ export interface Session {
   workDate: string;
   splitRounds: boolean;
   notes: string | null;
+  /** ขั้นของงาน (คำนวณที่เซิร์ฟเวอร์จาก qcStatus + เวลาส่งงาน) */
+  stage: Stage;
+  /** การส่งงานครั้งล่าสุด (ถอนการส่งแล้ว = ว่าง) */
+  submittedAt: number | null;
+  submittedBy: string | null;
+  submittedById: string | null;
+  /** ผลตรวจ QC ครั้งล่าสุด (ผ่าน / ตีกลับ) */
   qcStatus: QcStatus;
   qcNote: string | null;
   qcBy: string | null;
+  qcById: string | null;
   qcAt: number | null;
   driver: { id: string; name: string; team: string | null };
   vehicle: { id: string; plate: string; equipment: string | null };

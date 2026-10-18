@@ -8,8 +8,12 @@ import { createStore, lsGet, lsSet, newId } from "./store";
 const K_OUT = "mlog:outbox";
 const K_OPEN = "mlog:open";
 const K_FAILED = "mlog:failed";
+const K_HELD = "mlog:held";
 const BASE_DELAY = 10_000;
 const MAX_DELAY = 120_000;
+/** งานที่ส่งให้ QC แล้ว / ผ่าน QC แล้ว เซิร์ฟเวอร์ไม่รับข้อมูลเพิ่ม — เก็บข้อมูลไว้ในเครื่อง แล้วลองส่งใหม่เป็นระยะ */
+const HELD_CODES = new Set(["err.lockedSubmitted", "err.locked"]);
+const HELD_RETRY_MS = 2 * 60_000;
 
 type OpenChunk = { id: string; sessionId: string; roundId: string; t0: number; pts: PtArr[] };
 /** รายการที่เซิร์ฟเวอร์ไม่รับ (code = key ของข้อความ ใช้แปลใหม่เมื่อเปลี่ยนภาษา) */
@@ -18,10 +22,12 @@ export type FailedOp = { k: string; sessionId: string; error: string; code?: str
 export type SyncError = { key: UiKey } | { text: string; serverKey?: string; params?: Record<string, string | number> };
 
 type SyncState = {
-  /** รายการรอส่งทั้งหมด (รวมก้อนพิกัดที่กำลังเก็บ) */
+  /** รายการรอส่งทั้งหมด (รวมก้อนพิกัดที่กำลังเก็บ และรายการที่ค้างเพราะงานถูกล็อก) */
   pending: number;
   /** รายการที่ปิดก้อนแล้วรอส่ง (ไม่นับก้อนที่กำลังเก็บ) */
   queued: number;
+  /** รายการที่ค้างไว้เพราะงานส่งให้ QC แล้ว / ผ่าน QC แล้ว (ส่งได้เมื่อถอนการส่งหรือถูกตีกลับ) */
+  held: number;
   syncing: boolean;
   lastOkAt: number | null;
   lastError: SyncError | null;
@@ -32,10 +38,13 @@ type SyncState = {
 
 let ops: SyncOp[] = lsGet<SyncOp[]>(K_OUT, []);
 let open: OpenChunk | null = lsGet<OpenChunk | null>(K_OPEN, null);
+let held: SyncOp[] = lsGet<SyncOp[]>(K_HELD, []);
+let heldTriedAt = 0;
 
 export const syncStore = createStore<SyncState>({
-  pending: ops.length + (open?.pts.length ? 1 : 0),
+  pending: ops.length + held.length + (open?.pts.length ? 1 : 0),
   queued: ops.length,
+  held: held.length,
   syncing: false,
   lastOkAt: null,
   lastError: null,
@@ -48,12 +57,28 @@ export const syncStore = createStore<SyncState>({
 export const syncEvents = new EventTarget();
 
 function counts() {
-  return { pending: ops.length + (open?.pts.length ? 1 : 0), queued: ops.length };
+  return { pending: ops.length + held.length + (open?.pts.length ? 1 : 0), queued: ops.length, held: held.length };
 }
 
 function persist() {
-  const ok = lsSet(K_OUT, ops) && lsSet(K_OPEN, open);
+  const ok = lsSet(K_OUT, ops) && lsSet(K_OPEN, open) && lsSet(K_HELD, held);
   syncStore.set({ ...counts(), storageError: !ok });
+}
+
+/** ส่งรายการที่ค้างไว้ใหม่ (เช่น งานถูกถอนการส่ง / ตีกลับแล้ว) — ใส่ไว้หน้าคิวเพื่อให้ลำดับเหตุการณ์ถูกต้อง */
+export function releaseHeld(sessionId?: string) {
+  const back = held.filter((o) => !sessionId || o.sessionId === sessionId);
+  if (!back.length) return;
+  held = held.filter((o) => !back.includes(o));
+  ops = [...back, ...ops];
+  persist();
+  void syncNow();
+}
+
+/** ทิ้งรายการที่ค้างไว้ (ผู้ใช้ยืนยันแล้ว) */
+export function discardHeld() {
+  held = [];
+  persist();
 }
 
 /** ปิดก้อนพิกัดปัจจุบันแล้วย้ายเข้าคิว */
@@ -87,11 +112,11 @@ export function addPoint(sessionId: string, roundId: string, t: number, v: [numb
   syncStore.set({ ...counts(), storageError: !ok });
 }
 
-/** รายการที่ยังไม่ได้ส่ง (includeOpen = รวมก้อนพิกัดที่กำลังเก็บ) */
+/** รายการที่ยังไม่ได้ส่ง รวมที่ค้างไว้ (includeOpen = รวมก้อนพิกัดที่กำลังเก็บ) */
 export function pendingOps(sessionId?: string, includeOpen = true): SyncOp[] {
   const all: SyncOp[] = includeOpen && open?.pts.length
-    ? [...ops, { id: open.id, sessionId: open.sessionId, k: "chunk", roundId: open.roundId, t0: open.t0, pts: open.pts }]
-    : [...ops];
+    ? [...held, ...ops, { id: open.id, sessionId: open.sessionId, k: "chunk", roundId: open.roundId, t0: open.t0, pts: open.pts }]
+    : [...held, ...ops];
   return sessionId ? all.filter((o) => o.sessionId === sessionId) : all;
 }
 
@@ -120,6 +145,13 @@ export async function syncNow(): Promise<void> {
       sealOpen();
       persist();
     }
+    // ลองส่งรายการที่ค้างไว้ใหม่เป็นระยะ (งานอาจถูกถอนการส่ง / ตีกลับจากเครื่องอื่นแล้ว)
+    if (held.length && navigator.onLine !== false && Date.now() - heldTriedAt > HELD_RETRY_MS) {
+      heldTriedAt = Date.now();
+      ops = [...held, ...ops];
+      held = [];
+      persist();
+    }
     while (ops.length) {
       const batch = ops.slice(0, SYNC_MAX_OPS);
       let res: { results: SyncResult[] };
@@ -143,7 +175,8 @@ export async function syncNow(): Promise<void> {
       for (const op of batch) {
         touched.add(op.sessionId);
         const r = byId.get(op.id);
-        if (r && !r.ok)
+        if (r && !r.ok && r.code && HELD_CODES.has(r.code)) held.push(op); // ไม่ทิ้งข้อมูล: รอจนงานแก้ไขได้อีกครั้ง
+        else if (r && !r.ok)
           failedNow.push({
             k: op.k, sessionId: op.sessionId, error: r.error ?? "", code: r.code, at: Date.now(),
             points: op.k === "chunk" ? op.pts.length : undefined,
@@ -179,7 +212,7 @@ export function clearFailed() {
 export function startSyncLoop() {
   const tick = async () => {
     await syncNow();
-    timer = setTimeout(tick, ops.length || open?.pts.length ? delay : 30_000);
+    timer = setTimeout(tick, ops.length || open?.pts.length ? delay : held.length ? HELD_RETRY_MS : 30_000);
   };
   const kick = () => {
     delay = BASE_DELAY;

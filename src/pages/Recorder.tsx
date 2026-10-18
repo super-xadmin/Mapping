@@ -3,13 +3,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { haversine } from "../../shared/geo";
-import { can, type CalKind } from "../../shared/labels";
+import { can, isLockedStage, type CalKind } from "../../shared/labels";
 import { fmtElapsed } from "../../shared/time";
 import type { Calibration, Round, Session } from "../../shared/types";
 import { useI18n } from "../i18n";
 import { ApiError, api, errMsg, isOffline } from "../lib/api";
 import { useAuth } from "../lib/auth";
-import { pendingOps, recentlySent, syncEvents, syncStore } from "../lib/outbox";
+import { canSubmit, isReady } from "../lib/flow";
+import { pendingOps, recentlySent, releaseHeld, syncEvents, syncStore } from "../lib/outbox";
 import { MAX_ACCURACY_M, liveTrack, recStore, recorder, type ActiveCal } from "../lib/recorder";
 import { dropSession, finishedKey, readSession, saveSession } from "../lib/sessionCache";
 import { lsGet, lsSet, useStore } from "../lib/store";
@@ -18,7 +19,7 @@ import { SOP, analyzeLoop, coverageLevel, pct, timeLevel } from "../lib/sop";
 import CalibrationForm from "../components/CalibrationForm";
 import SyncBar, { useOnline } from "../components/SyncBar";
 import TrackMap from "../components/TrackMap";
-import { CalBadge, ErrorBox, Menu, Pending, QcBadge, Spinner, useConfirmTap, useNow, useTapGuard } from "../components/ui";
+import { CalBadge, ErrorBox, Menu, Pending, Spinner, StageBadge, useConfirmTap, useNow, useTapGuard } from "../components/ui";
 
 const K_MAP = "mlog:showMap";
 /** มีจุด GPS ใหม่ภายในเวลานี้ = น่าจะกำลังบันทึกอยู่บนเครื่องอื่น */
@@ -27,6 +28,7 @@ const LIVE_ELSEWHERE_MS = 2 * 60_000;
 /** ขั้นต่อไปที่ต้องทำ (ตัดสินจากข้อมูลงาน + สถานะในเครื่อง) */
 type Next =
   | { a: "locked" }
+  | { a: "submitted" }
   | { a: "readonly" }
   | { a: "endRun"; roundId: string; seq: number | null }
   | { a: "endCal"; cal: Calibration; local: boolean }
@@ -59,7 +61,8 @@ function nextAction(s: Session, x: Ctx): Next {
     }
     if (c.endedAt == null) return { a: "endCal", cal: c, local: true };
   }
-  if (s.qcStatus === "PASSED") return { a: "locked" };
+  if (s.stage === "passed") return { a: "locked" };
+  if (s.stage === "submitted") return { a: "submitted" }; // ส่งงานแล้ว รอ QC ตรวจ
   if (!x.canRec) return { a: "readonly" };
   const openCal = s.calibrations.find((c) => c.startedAt != null && c.endedAt == null);
   if (openCal) return { a: "endCal", cal: openCal, local: false };
@@ -131,6 +134,9 @@ function RecorderPage({ id }: { id: string }) {
     return typeof v === "number" ? v : v === true ? 1 : null; // true = ค่าจากเวอร์ชันก่อน
   });
   const [newTopic, setNewTopic] = useState("");
+  const [submitNote, setSubmitNote] = useState("");
+  const [flowErr, setFlowErr] = useState<string[]>([]);
+  const [flowBusy, setFlowBusy] = useState(false);
   const confirmTap = useConfirmTap();
   const fetchedAt = useRef(cached?.at ?? 0); // เวลาที่เริ่มโหลดข้อมูลชุดที่แสดงอยู่
 
@@ -145,6 +151,7 @@ function RecorderPage({ id }: { id: string }) {
       setFromCache(false);
       setErr("");
       saveSession(id, s, startedAt);
+      if (!isLockedStage(s.stage)) releaseHeld(id); // งานกลับมาแก้ไขได้ (ถอนการส่ง / ตีกลับ): ส่งข้อมูลที่ค้างไว้
       return s;
     } catch (e) {
       if (isOffline(e)) setFromCache(true);
@@ -182,7 +189,7 @@ function RecorderPage({ id }: { id: string }) {
   const localCal = rec.cal?.sessionId === id ? rec.cal : null;
 
   // เปิด GPS เฉพาะเมื่อบันทึกได้ (ไม่ขอสิทธิ์ตำแหน่งในงานที่ล็อกแล้ว หรือบัญชีดูอย่างเดียว)
-  const wantGps = !!activeHere || (!!server && !!user && can.record(user.role) && server.qcStatus !== "PASSED");
+  const wantGps = !!activeHere || (!!server && !!user && can.record(user.role) && !isLockedStage(server.stage));
   useEffect(() => (wantGps ? recorder.attachView() : undefined), [wantGps]);
 
   // Calibration ที่เริ่มในเครื่องนี้ แต่ถูกกดเสร็จ/ลบจากที่อื่นแล้ว → เลิกแสดงว่ากำลังทำ
@@ -231,7 +238,7 @@ function RecorderPage({ id }: { id: string }) {
 
   const wd = s.workDate;
   const canRec = !!user && can.record(user.role);
-  const editable = canRec && s.qcStatus !== "PASSED";
+  const editable = canRec && !isLockedStage(s.stage); // ส่งงานแล้ว / ผ่าน QC แล้ว บันทึกเพิ่มไม่ได้
   const busy = !!activeElsewhere || !!calElsewhere;
   const next = nextAction(s, { canRec, activeRoundId: activeHere?.roundId ?? null, localCal, busy, finishedAt, pick });
   const idle = editable && !activeHere && !openCal && !localCal && !busy;
@@ -262,13 +269,16 @@ function RecorderPage({ id }: { id: string }) {
     setPick(null);
     setPanel(null);
   }
-  /** หยุดรอบ/Calibration ของเครื่องนี้ — งานที่ล็อกแล้วหรือบันทึกไม่ได้ หยุดในเครื่องอย่างเดียว (เซิร์ฟเวอร์ไม่รับแล้ว) */
+  /**
+   * หยุดรอบ/Calibration ของเครื่องนี้ — งานที่ถูกล็อกระหว่างทาง (ส่งงาน/ผ่าน QC) ยังส่ง "จบ" เข้าคิวไว้
+   * (เครื่องเก็บไว้จนงานแก้ไขได้อีกครั้ง) ส่วนบัญชีที่บันทึกไม่ได้แล้ว หยุดในเครื่องอย่างเดียว
+   */
   function stopRun(roundId: string) {
-    if (editable) recorder.endRound();
+    if (canRec) recorder.endRound();
     else recorder.forgetRound(roundId);
   }
   function stopCal(cal: Calibration) {
-    if (editable) recorder.endCal(id, cal.id);
+    if (canRec) recorder.endCal(id, cal.id);
     else recorder.forgetCal(cal.id);
   }
   /** บันทึก GPS ต่อในเครื่องนี้ — โหลดข้อมูลล่าสุดก่อน เผื่อรอบนี้ถูกจบไปแล้วจากเครื่องอื่น */
@@ -292,6 +302,21 @@ function RecorderPage({ id }: { id: string }) {
     recorder.addRound(id, topic);
     setNewTopic("");
     setPanel(null);
+  }
+  /** ส่งงานให้ QC ตรวจ / ถอนการส่ง (ต้องออนไลน์ เซิร์ฟเวอร์ตรวจความพร้อมซ้ำ) */
+  async function flow(action: "submit" | "withdraw") {
+    setFlowErr([]);
+    setFlowBusy(true);
+    try {
+      await api(`/sessions/${id}/qc`, { body: { action, note: action === "submit" ? submitNote : null } });
+      setSubmitNote("");
+      await load();
+    } catch (e) {
+      const problems = e instanceof ApiError && e.data && typeof e.data === "object" ? (e.data as { problems?: string[] }).problems : undefined;
+      setFlowErr([errMsg(e), ...(problems ?? [])]);
+    } finally {
+      setFlowBusy(false);
+    }
   }
   function toggleMap() {
     lsSet(K_MAP, !showMap);
@@ -390,10 +415,17 @@ function RecorderPage({ id }: { id: string }) {
   const orphanLast = next.a === "orphan" ? (next.round.lastT ?? next.round.startedAt ?? 0) : 0;
   const liveElsewhere = next.a === "orphan" && now - orphanLast < LIVE_ELSEWHERE_MS;
 
+  const localPending = pendingOps(id).length; // ข้อมูลของงานนี้ที่ยังอยู่ในเครื่อง
+  const mineSubmitted = !!user && s.submittedById === user.id;
+
   switch (next.a) {
     case "locked":
     case "readonly":
       primary = detailsBtn;
+      break;
+    case "submitted":
+      primary = detailsBtn;
+      if (mineSubmitted) secondary.push(sec("withdraw", t("flow.withdraw"), () => void flow("withdraw"), true));
       break;
     case "endRun":
       primary = (
@@ -480,7 +512,23 @@ function RecorderPage({ id }: { id: string }) {
       if (s.splitRounds) secondary.push(sec("addRun", t("act.addRun"), () => setPanel("addRun")));
       break;
     case "done":
-      primary = detailsBtn;
+      // ขั้นสุดท้าย: ส่งงานให้ผู้ตรวจ QC (แตะยืนยัน 2 ครั้ง เพราะส่งแล้วแก้ไขไม่ได้)
+      if (!canSubmit(s, user)) {
+        primary = detailsBtn;
+        break;
+      }
+      primary = (
+        <BigButton
+          stepKey={stepKey}
+          tone="go"
+          armed={confirmTap.armed === "submit"}
+          armedNote={t("flow.submitHint")}
+          label={t("flow.submit")}
+          sub={!online ? t("flow.offline") : localPending ? t("flow.pendingLocal", { n: localPending }) : t("flow.submitHint")}
+          disabled={flowBusy || !online || localPending > 0}
+          onClick={() => confirmTap.tap("submit", () => void flow("submit"))}
+        />
+      );
       if (editable && s.splitRounds) secondary.push(sec("addRun", t("act.addRun"), () => setPanel("addRun")));
       break;
   }
@@ -493,16 +541,18 @@ function RecorderPage({ id }: { id: string }) {
       : rec.watching
         ? { cls: "warn", text: t("pill.gpsWait") }
         : null;
-  const syncBad = sync.storageError || sync.authError || sync.failed.length > 0;
+  const syncBad = sync.storageError || sync.authError || sync.failed.length > 0 || sync.held > 0;
   const syncPill = !online
     ? { cls: "warn", text: `${t("pill.offline")}${sync.pending ? ` · ${t("pill.pending", { n: sync.pending })}` : ""}` }
     : sync.syncing && sync.queued
       ? { cls: "warn", text: t("pill.syncing") }
       : sync.queued
         ? { cls: syncBad ? "bad" : "warn", text: t("pill.pending", { n: sync.queued }) }
-        : sync.failed.length
-          ? { cls: "bad", text: t("pill.failed", { n: sync.failed.length }) }
-          : { cls: sync.storageError || sync.authError ? "bad" : "ok", text: t("pill.synced") };
+        : sync.held
+          ? { cls: "warn", text: t("pill.held", { n: sync.held }) }
+          : sync.failed.length
+            ? { cls: "bad", text: t("pill.failed", { n: sync.failed.length }) }
+            : { cls: sync.storageError || sync.authError ? "bad" : "ok", text: t("pill.synced") };
   const totalKm = s.rounds.reduce((a, r) => a + r.distanceM, 0);
 
   return (
@@ -524,6 +574,12 @@ function RecorderPage({ id }: { id: string }) {
           )}
           {editable && <button type="button" className="menu-item" onClick={() => setPanel("manualCal")}>{t("act.manualCal")}</button>}
           {editable && s.splitRounds && <button type="button" className="menu-item" onClick={() => setPanel("addRun")}>{t("act.addRun")}</button>}
+          {/* รอบตามแผนที่ไม่ได้วิ่ง: ส่งงานได้จากเมนูนี้ (ปุ่มใหญ่ยังพาไปรอบถัดไปตามปกติ) */}
+          {next.a === "startRun" && canSubmit(s, user) && isReady(s, t) && online && !localPending && (
+            <button type="button" className="menu-item" onClick={() => confirm(t("flow.submitConfirm")) && void flow("submit")}>
+              {t("flow.submitSkip")}
+            </button>
+          )}
           <button type="button" className="menu-item" onClick={() => nav(`/sessions/${id}`)}>{t("act.details")}</button>
           <button type="button" className="menu-item" onClick={toggleMap}>{showMap ? t("act.hideMap") : t("act.showMap")}</button>
           <button type="button" className="menu-item" onClick={() => setPanel("sync")}>{t("act.syncStatus")}</button>
@@ -533,13 +589,16 @@ function RecorderPage({ id }: { id: string }) {
       <div className="pills">
         {gpsPill && <span className={`pill ${gpsPill.cls}`}>{gpsPill.text}</span>}
         <button type="button" className={`pill ${syncPill.cls}`} onClick={() => setPanel(panel === "sync" ? null : "sync")}>☁ {syncPill.text}</button>
-        <QcBadge status={s.qcStatus} />
+        <StageBadge stage={s.stage} />
         <CalBadge cals={s.calibrations} />
       </div>
 
       <ErrorBox error={err} onRetry={() => void load()} />
       {fromCache && <div className="alert warn small">{t("rec.fromCache")}</div>}
-      {s.qcStatus === "PASSED" && <div className="alert ok">{t("rec.locked")}</div>}
+      {s.stage === "passed" && <div className="alert ok">{t("rec.locked")}</div>}
+      {s.stage === "submitted" && <div className="alert warn">{t("rec.submitted", { by: s.submittedBy ?? "-", at: f.dt(s.submittedAt) })}</div>}
+      {s.stage === "returned" && <div className="alert bad">{t("rec.returned", { by: s.qcBy ?? "-", note: s.qcNote ?? "" })}</div>}
+      {flowErr.length > 0 && <div className="alert bad">{flowErr.map((x) => <div key={x}>{x}</div>)}</div>}
       {!canRec && <div className="alert warn">{t("rec.viewer")}</div>}
       {activeElsewhere && <div className="alert warn">{t("rec.elsewhere", { label: activeElsewhere.label })}</div>}
       {calElsewhere && !activeElsewhere && <div className="alert warn">{t("rec.calElsewhere")}</div>}
@@ -627,7 +686,8 @@ function RecorderPage({ id }: { id: string }) {
         <div className="card done-card">
           <h3 className="m0">{t("done.title")}</h3>
           <p>{t("done.summary", { runs: s.rounds.length, km: f.km(totalKm), cals: s.calibrations.length })}</p>
-          <p className="muted small m0">{t("done.next")}</p>
+          <p className="muted small">{t("done.next")}</p>
+          <input maxLength={1000} aria-label={t("flow.notePh")} placeholder={t("flow.notePh")} value={submitNote} onChange={(e) => setSubmitNote(e.target.value)} />
         </div>
       )}
 

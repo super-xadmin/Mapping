@@ -11,11 +11,28 @@ export const can = {
   record: (r: Role) => r === "admin" || r === "qc" || r === "field",
   qc: (r: Role) => r === "admin" || r === "qc",
   admin: (r: Role) => r === "admin",
+  /** เพิ่ม / แก้ไข / ปิดใช้งาน คนขับ รถ โปรเจกต์: ทุกคนยกเว้นบัญชีดูอย่างเดียว */
+  master: (r: Role) => r === "admin" || r === "qc" || r === "field",
 };
 
 export type QcStatus = "PENDING" | "PASSED" | "REDO";
 export const QC_STATUSES: QcStatus[] = ["PENDING", "PASSED", "REDO"];
 export const isQc = (s: unknown): s is QcStatus => typeof s === "string" && (QC_STATUSES as string[]).includes(s);
+
+/**
+ * ขั้นของงาน: กำลังทำ → ส่งงานแล้ว (รอ QC ตรวจ) → ผ่าน QC (ล็อก)
+ *                          ↘ ตีกลับ (แก้แล้วส่งใหม่) / ถอนการส่ง (กลับไปกำลังทำ)
+ */
+export type Stage = "open" | "submitted" | "passed" | "returned";
+export const STAGES: Stage[] = ["open", "submitted", "passed", "returned"];
+export const isStage = (s: unknown): s is Stage => typeof s === "string" && (STAGES as string[]).includes(s);
+/** ส่งงานแล้วหรือผ่าน QC แล้ว: บันทึกเพิ่ม/แก้ไขไม่ได้ */
+export const isLockedStage = (s: Stage) => s === "submitted" || s === "passed";
+
+/** submit / withdraw = คนบันทึกงาน, pass / return = ผู้ตรวจ QC (ต้องไม่ใช่คนที่ส่งงานนั้น) */
+export type QcAction = "submit" | "withdraw" | "pass" | "return";
+export const QC_ACTIONS: QcAction[] = ["submit", "withdraw", "pass", "return"];
+export const isQcAction = (a: unknown): a is QcAction => typeof a === "string" && (QC_ACTIONS as string[]).includes(a);
 
 export type CalKind = "pre" | "mid" | "post";
 export const CAL_KINDS: CalKind[] = ["pre", "mid", "post"];

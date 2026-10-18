@@ -1,20 +1,22 @@
-// จัดการระบบ (ผู้ดูแลระบบ): ผู้ใช้งาน, ข้อมูลหลัก, ประวัติการใช้งานทั้งระบบ
+// จัดการระบบ (ผู้ดูแลระบบ): ผู้ใช้งาน, ประวัติการใช้งานทั้งระบบ
+// (คนขับ / รถ / โปรเจกต์ ย้ายไปหน้า "ข้อมูลหลัก" ที่ทุกคนยกเว้นบัญชีดูอย่างเดียวใช้ได้)
 import { useCallback, useEffect, useState } from "react";
-import { Link, useSearchParams } from "react-router";
-import { PASSWORD_MIN, ROLES, type MasterType, type Role } from "../../shared/labels";
-import type { AuditEntry, Master, UserRow } from "../../shared/types";
+import { Link, Navigate, useSearchParams } from "react-router";
+import { PASSWORD_MIN, ROLES, type Role } from "../../shared/labels";
+import type { AuditEntry, UserRow } from "../../shared/types";
 import { useI18n, type UiKey } from "../i18n";
 import { api, errMsg } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { describeAudit } from "../lib/auditText";
 import { ErrorBox } from "../components/ui";
 
-const TABS: Record<"users" | "master" | "audit", UiKey> = { users: "adm.tabUsers", master: "adm.tabMaster", audit: "adm.tabAudit" };
+const TABS: Record<"users" | "audit", UiKey> = { users: "adm.tabUsers", audit: "adm.tabAudit" };
 type Tab = keyof typeof TABS;
 
 export default function Admin() {
   const { t } = useI18n();
   const [sp, setSp] = useSearchParams();
+  if (sp.get("tab") === "master") return <Navigate to="/master" replace />; // ลิงก์เดิม
   const tab = (sp.get("tab") as Tab) in TABS ? (sp.get("tab") as Tab) : "users";
   return (
     <>
@@ -24,7 +26,6 @@ export default function Admin() {
         ))}
       </div>
       {tab === "users" && <Users />}
-      {tab === "master" && <MasterData />}
       {tab === "audit" && <AuditLog />}
     </>
   );
@@ -126,80 +127,6 @@ function Users() {
         </table>
       </div>
     </>
-  );
-}
-
-const MASTER: Record<MasterType, { title: UiKey; main: [string, UiKey]; sub: [string, UiKey] }> = {
-  drivers: { title: "col.driver", main: ["name", "adm.driversMain"], sub: ["team", "adm.driversSub"] },
-  vehicles: { title: "col.vehicle", main: ["plate", "adm.vehiclesMain"], sub: ["equipment", "adm.vehiclesSub"] },
-  projects: { title: "col.project", main: ["name", "adm.projectsMain"], sub: ["area", "adm.projectsSub"] },
-};
-
-function MasterData() {
-  const [m, setM] = useState<Master | null>(null);
-  const [err, setErr] = useState("");
-  const load = useCallback(() => api<Master>("/master").then(setM).catch((e) => setErr(errMsg(e))), []);
-  useEffect(() => {
-    void load();
-  }, [load]);
-  return (
-    <>
-      <ErrorBox error={err} />
-      <div className="grid three">
-        {(Object.keys(MASTER) as MasterType[]).map((k) => (
-          <MasterSection key={k} k={k} rows={(m?.[k] ?? []) as unknown as Record<string, string | boolean | null>[]} reload={load} onError={setErr} />
-        ))}
-      </div>
-    </>
-  );
-}
-
-function MasterSection({ k, rows, reload, onError }: { k: MasterType; rows: Record<string, string | boolean | null>[]; reload: () => void; onError: (e: string) => void }) {
-  const { t } = useI18n();
-  const c = MASTER[k];
-  const [main, setMain] = useState("");
-  const [sub, setSub] = useState("");
-  async function add(e: React.FormEvent) {
-    e.preventDefault();
-    try {
-      await api(`/master/${k}`, { body: { [c.main[0]]: main, [c.sub[0]]: sub } });
-      setMain("");
-      setSub("");
-      reload();
-    } catch (e) {
-      onError(errMsg(e));
-    }
-  }
-  async function toggle(id: string, active: boolean) {
-    if (!active && !confirm(t("adm.disableConfirm"))) return;
-    try {
-      await api(`/master/${k}/${id}`, { method: "PATCH", body: { active } });
-      reload();
-    } catch (e) {
-      onError(errMsg(e));
-    }
-  }
-  return (
-    <div className="card">
-      <h3>{t(c.title)}</h3>
-      <form className="stack" onSubmit={add}>
-        <input required placeholder={t(c.main[1])} value={main} onChange={(e) => setMain(e.target.value)} />
-        <input placeholder={t(c.sub[1])} value={sub} onChange={(e) => setSub(e.target.value)} />
-        <button className="pri">{t("c.add")}</button>
-      </form>
-      <table className="compact">
-        <tbody>
-          {rows.map((r) => (
-            <tr key={String(r.id)} className={r.active ? "" : "inactive"}>
-              <td>{String(r[c.main[0]] ?? "")}<div className="muted small">{String(r[c.sub[0]] ?? "")}</div></td>
-              <td className="right">
-                <button className="link" onClick={() => void toggle(String(r.id), !r.active)}>{r.active ? t("c.disable") : t("c.enable")}</button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
   );
 }
 

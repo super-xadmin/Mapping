@@ -57,8 +57,16 @@ export function describeAudit(e: AuditEntry, t: TFn, f: Formatters, workDate?: s
       return t("au.calUpdate", { n: s(d.seq), before: cal(d.before), after: cal(d.after) });
     case "cal.delete":
       return t("au.calDelete", { n: s(d.seq), before: cal(d.before) });
-    case "qc.update":
+    case "qc.update": // ก่อน v3.2
       return `${t("au.qcUpdate", { from: qc(d.from), to: qc(d.to) })}${d.note ? ` — ${s(d.note)}` : ""}`;
+    case "qc.submit":
+      return `${t("au.qcSubmit")}${d.note ? ` — ${s(d.note)}` : ""}`;
+    case "qc.withdraw":
+      return t("au.qcWithdraw");
+    case "qc.pass":
+      return `${t("au.qcPass")}${d.note ? ` — ${s(d.note)}` : ""}`;
+    case "qc.return":
+      return `${d.from === "passed" ? t("au.qcUnpass") : t("au.qcReturn")}${d.note ? ` — ${s(d.note)}` : ""}`;
     case "auth.setup":
       return t("au.authSetup", { u: s(d.username) });
     case "auth.login":
@@ -85,8 +93,13 @@ export function describeAudit(e: AuditEntry, t: TFn, f: Formatters, workDate?: s
     case "master.create":
       return `${t("au.masterCreate", { type: masterType(d.type), name: s(d.name) })}${d.detail ? ` (${s(d.detail)})` : ""}`;
     case "master.update": {
-      const state = d.active === false ? ` — ${t("au.userDisabled")}` : d.active === true ? ` — ${t("au.userEnabled")}` : "";
-      return `${t("au.masterUpdate", { type: masterType(d.type), name: s(d.name) })}${state}`;
+      const parts: string[] = [];
+      if (d.newName) parts.push(t("au.renamed", { v: s(d.newName) }));
+      if ("detail" in d) parts.push(t("au.detailChanged", { v: s(d.detail) || "-" }));
+      if (d.active === false) parts.push(t("au.userDisabled"));
+      if (d.active === true) parts.push(t("au.userEnabled"));
+      const head = t("au.masterUpdate", { type: masterType(d.type), name: s(d.name) });
+      return parts.length ? `${head} — ${parts.join(t("au.sep"))}` : head;
     }
     default:
       return e.action;

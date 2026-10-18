@@ -2,19 +2,21 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { pathDistance } from "../../shared/geo";
-import { QC_STATUSES, can, type QcStatus } from "../../shared/labels";
+import { can, isLockedStage } from "../../shared/labels";
 import { bkkHHMMSS } from "../../shared/time";
 import { calComplete, type AuditEntry, type Calibration, type Master, type Session } from "../../shared/types";
 import { useI18n } from "../i18n";
-import { ApiError, api, errMsg } from "../lib/api";
+import { api, errMsg } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { describeAudit } from "../lib/auditText";
 import { exportGeoJson, exportGpx, exportPointsCsv } from "../lib/exporters";
+import { releaseHeld } from "../lib/outbox";
 import { decodeTrack, type TP, type TrackResponse } from "../lib/track";
 import { SOP, analyzeJob, analyzeLoop, closedLevel, coverageLevel, pct, timeLevel, type LoopCheck } from "../lib/sop";
 import CalibrationForm from "../components/CalibrationForm";
+import FlowPanel from "../components/FlowPanel";
 import TrackMap, { COLORS } from "../components/TrackMap";
-import { CalBadge, ErrorBox, Menu, QcBadge, Spinner } from "../components/ui";
+import { CalBadge, ErrorBox, Menu, Spinner, StageBadge } from "../components/ui";
 
 function Delay({ planned, actual }: { planned: number | null; actual: number | null }) {
   const { t } = useI18n();
@@ -55,6 +57,7 @@ function DetailPage({ id }: { id: string }) {
       setTracks(decodeTrack(tr));
       setAudit(au);
       setErr("");
+      if (!isLockedStage(sess.stage)) releaseHeld(sess.id); // งานกลับมาแก้ไขได้: ส่งข้อมูลที่ค้างอยู่ในเครื่องนี้
     } catch (e) {
       setErr(errMsg(e));
     }
@@ -115,7 +118,7 @@ function DetailPage({ id }: { id: string }) {
 
   const wd = s.workDate;
   const canRec = !!user && can.record(user.role);
-  const locked = s.qcStatus === "PASSED";
+  const locked = isLockedStage(s.stage); // ส่งงานแล้ว / ผ่าน QC แล้ว
   const editable = canRec && !locked;
   const dist = (rid: string) => pathDistance(tracks[rid] ?? []);
   const total = s.rounds.reduce((a, r) => a + dist(r.id), 0);
@@ -147,7 +150,7 @@ function DetailPage({ id }: { id: string }) {
           <div className="clip">
             <h2 className="m0">{s.title}</h2>
             <div className="row small m0">
-              <QcBadge status={s.qcStatus} />
+              <StageBadge stage={s.stage} />
               <CalBadge cals={s.calibrations} />
               <span className="muted">{f.date(wd)} · {t("sd.totalDist", { v: f.km(total) })} · {t("sd.runsCount", { n: s.rounds.length })}</span>
             </div>
@@ -161,7 +164,7 @@ function DetailPage({ id }: { id: string }) {
             </Menu>
           </div>
         </div>
-        {editInfo ? (
+        {editInfo && editable ? (
           <EditInfo s={s} onDone={() => { setEditInfo(false); void load(); }} onCancel={() => setEditInfo(false)} />
         ) : (
           <div className="grid info">
@@ -218,7 +221,7 @@ function DetailPage({ id }: { id: string }) {
             </table>
           </div>
         )}
-        {calEdit && (
+        {calEdit && editable && (
           <CalibrationForm
             key={calEdit === "new" ? "new" : calEdit.id}
             sessionId={s.id}
@@ -314,9 +317,10 @@ function DetailPage({ id }: { id: string }) {
       </div>
 
       <div className="grid two">
-        {user && can.qc(user.role) && (
-          <QcPanel
+        {user && (
+          <FlowPanel
             s={s}
+            audit={audit}
             onDone={() => void load()}
             sop={hasTrack ? [
               { level: coverageLevel(sopJob), text: `${t("sop.checkRoundTrip")}${sopJob != null ? ` — ${pct(sopJob)}%` : ""}` },
@@ -351,71 +355,6 @@ function worst(levels: (Level | null)[]): Level | null {
   const xs = levels.filter((x): x is Level => x != null);
   if (!xs.length) return null;
   return xs.includes("bad") ? "bad" : xs.includes("warn") ? "warn" : "ok";
-}
-
-function QcPanel({ s, onDone, sop }: { s: Session; onDone: () => void; sop: { level: Level | null; text: string }[] }) {
-  const { t, f } = useI18n();
-  const [status, setStatus] = useState<QcStatus>(s.qcStatus);
-  const [note, setNote] = useState(s.qcNote ?? "");
-  const [err, setErr] = useState<string[]>([]);
-  const [busy, setBusy] = useState(false);
-  const checks = [
-    { ok: calComplete(s.calibrations), text: t("qcpanel.chkCal") },
-    { ok: !s.calibrations.some((c) => c.startedAt != null && c.endedAt == null), text: t("qcpanel.chkNoOpenCal") },
-    { ok: !s.rounds.some((r) => r.startedAt && !r.endedAt), text: t("qcpanel.chkNoRunning") },
-    { ok: s.rounds.some((r) => r.endedAt), text: t("qcpanel.chkEnded") },
-  ];
-  async function save() {
-    setErr([]);
-    setBusy(true);
-    try {
-      await api(`/sessions/${s.id}/qc`, { method: "PATCH", body: { status, note } });
-      onDone();
-    } catch (e) {
-      const problems = e instanceof ApiError && e.data && typeof e.data === "object" ? (e.data as { problems?: string[] }).problems : undefined;
-      setErr(problems ?? [errMsg(e)]);
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <div className="card">
-      <h3>{t("qcpanel.title")}</h3>
-      <ul className="checklist">
-        {checks.map((c) => <li key={c.text} className={c.ok ? "ok-text" : "bad-text"}>{c.ok ? "✓" : "✗"} {c.text}</li>)}
-      </ul>
-      {sop.some((x) => x.level) && (
-        <div className="sop-box">
-          <div className="sop-head">{t("sop.advisory")}</div>
-          <ul className="checklist m0">
-            {sop.filter((x) => x.level).map((x) => (
-              <li key={x.text} className={x.level === "ok" ? "ok-text" : "warn-text"}>{x.level === "ok" ? "✓" : "⚠"} {x.text}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-      <div className="field">
-        <span>{t("qcpanel.status")}</span>
-        <div className="chips" role="radiogroup" aria-label={t("qcpanel.status")}>
-          {QC_STATUSES.map((k) => (
-            <button key={k} type="button" role="radio" aria-checked={k === status} className={`chip qc-chip qc-${k}${k === status ? " on" : ""}`} onClick={() => setStatus(k)}>
-              {t(`qc.${k}`)}
-            </button>
-          ))}
-        </div>
-      </div>
-      <label className="field">
-        <span>{t("c.notes")}</span>
-        <textarea rows={3} maxLength={1000} value={note} onChange={(e) => setNote(e.target.value)} placeholder={t("qcpanel.notePh")} />
-      </label>
-      {err.length > 0 && <div className="alert bad">{err.map((x) => <div key={x}>{x}</div>)}</div>}
-      <button className="pri" disabled={busy} onClick={() => void save()}>{t("qcpanel.save")}</button>
-      {s.qcBy && <p className="muted small">{t("qcpanel.lastBy", { by: s.qcBy, at: f.dt(s.qcAt) })}</p>}
-      {s.qcStatus === "PASSED" && (
-        <p className="muted small">{t("qcpanel.lockedHint", { pending: t("qc.PENDING"), redo: t("qc.REDO") })}</p>
-      )}
-    </div>
-  );
 }
 
 function EditInfo({ s, onDone, onCancel }: { s: Session; onDone: () => void; onCancel: () => void }) {

@@ -1,6 +1,6 @@
 // สร้างไฟล์ GPX / GeoJSON / CSV ในเบราว์เซอร์ (ไม่ใช้ CPU ของ Worker) — หัวตารางตามภาษาที่เลือก
 import { pathDistance } from "../../shared/geo";
-import { bkkDate, bkkHHMMSS, fmtClock } from "../../shared/time";
+import { bkkDate, bkkHHMMSS, fmtClock, fmtDateTime } from "../../shared/time";
 import type { Session } from "../../shared/types";
 import { tr, type Key, type Lang } from "../i18n";
 import type { TP } from "./track";
@@ -49,7 +49,7 @@ export function exportGpx(s: Session, tracks: Record<string, TP[]>, lang: Lang) 
       return `  <trk>\n    <name>${xml(tr(lang, "step.run", { n: r.seq, topic: r.topic }))}</name>\n    <trkseg>\n${pts}\n    </trkseg>\n  </trk>`;
     })
     .join("\n");
-  const desc = `${s.project.name} | ${s.driver.name} | ${s.vehicle.plate} | ${tr(lang, "ex.cal")}: ${calSummary(s, lang)} | ${tr(lang, "col.qc")}: ${tr(lang, `qc.${s.qcStatus}`)}`;
+  const desc = `${s.project.name} | ${s.driver.name} | ${s.vehicle.plate} | ${tr(lang, "ex.cal")}: ${calSummary(s, lang)} | ${tr(lang, "col.qc")}: ${tr(lang, `stage.${s.stage}`)}`;
   const gpx = `<?xml version="1.0" encoding="UTF-8"?>
 <gpx version="1.1" creator="Mapping Log" xmlns="http://www.topografix.com/GPX/1/1">
   <metadata><name>${xml(s.title)}</name><desc>${xml(desc)}</desc><time>${new Date(s.createdAt).toISOString()}</time></metadata>
@@ -63,7 +63,9 @@ export function exportGeoJson(s: Session, tracks: Record<string, TP[]>) {
     type: "FeatureCollection",
     properties: {
       title: s.title, workDate: s.workDate, project: s.project.name, area: s.project.area, driver: s.driver.name, team: s.driver.team,
-      vehicle: s.vehicle.plate, equipment: s.vehicle.equipment, qcStatus: s.qcStatus, qcNote: s.qcNote,
+      vehicle: s.vehicle.plate, equipment: s.vehicle.equipment, stage: s.stage, qcStatus: s.qcStatus, qcNote: s.qcNote,
+      submittedBy: s.submittedBy, submittedAt: s.submittedAt ? new Date(s.submittedAt).toISOString() : null,
+      qcBy: s.qcBy, qcAt: s.qcAt ? new Date(s.qcAt).toISOString() : null,
       calibrations: s.calibrations.map((c) => ({
         kind: c.kind,
         startedAt: c.startedAt ? new Date(c.startedAt).toISOString() : null,
@@ -98,7 +100,7 @@ export function exportPointsCsv(s: Session, tracks: Record<string, TP[]>) {
 
 const SUMMARY_COLS: Key[] = [
   "ex.date", "ex.job", "ex.project", "ex.area", "ex.driver", "ex.team", "ex.vehicle", "ex.equipment", "ex.cal", "ex.calOk",
-  "ex.runs", "ex.start", "ex.end", "ex.km", "ex.points", "ex.qc", "ex.qcNote", "ex.by",
+  "ex.runs", "ex.start", "ex.end", "ex.km", "ex.points", "ex.qc", "ex.submittedBy", "ex.submittedAt", "ex.qcBy", "ex.qcAt", "ex.qcNote", "ex.by",
 ];
 
 /** สรุปหลายงาน (จากหน้าประวัติ) เป็น CSV สำหรับทำรายงาน */
@@ -115,7 +117,12 @@ export function exportSummaryCsv(sessions: Session[], lang: Lang) {
       ended.length ? fmtClock(Math.max(...ended), s.workDate, lang) : "",
       (s.rounds.reduce((a, r) => a + r.distanceM, 0) / 1000).toFixed(2),
       s.rounds.reduce((a, r) => a + r.pointCount, 0),
-      tr(lang, `qc.${s.qcStatus}`), s.qcNote, s.createdBy,
+      tr(lang, `stage.${s.stage}`),
+      s.submittedBy, s.submittedAt ? fmtDateTime(s.submittedAt, lang) : "",
+      s.stage === "passed" || s.stage === "returned" ? s.qcBy : "",
+      (s.stage === "passed" || s.stage === "returned") && s.qcAt ? fmtDateTime(s.qcAt, lang) : "",
+      s.stage === "passed" || s.stage === "returned" ? s.qcNote : "",
+      s.createdBy,
     ]);
   }
   download(`mapping_summary_${bkkDate()}.csv`, csv(rows), "text/csv;charset=utf-8");

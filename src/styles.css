@@ -63,7 +63,10 @@ header.top .brand { text-decoration: none; flex: none; }
 header.top nav { display: flex; gap: 2px; }
 header.top nav a {
   position: relative; color: var(--text); font-weight: 500; padding: 8px 12px; border-radius: var(--r-sm); text-decoration: none;
+  white-space: nowrap;
 }
+/* จอแคบ (แท็บเล็ต / หน้าต่างเล็ก): เมนูหลักอยู่ในปุ่ม ☰ แทน ไม่ให้ชื่อเมนูตัดเป็น 2 บรรทัด */
+@media (max-width: 1100px) { header.top .top-nav { display: none; } }
 header.top nav a:hover { background: var(--mist); }
 header.top nav a.active { color: var(--midnight); }
 header.top nav a.active::after {
@@ -183,6 +186,9 @@ button.pri:hover, .btn.pri:hover { background: var(--midnight-deep); }
 button.go, .btn.go { background: var(--go); border: none; color: #fff; font-weight: 600; box-shadow: 0 10px 24px -14px rgba(28, 53, 100, 0.9); }
 button.go:hover, .btn.go:hover { filter: brightness(1.06); background: var(--go); }
 button.bad { background: var(--stop); border-color: var(--stop); color: #fff; }
+button.bad:hover { background: var(--stop); filter: brightness(1.08); }
+button.ok-solid { background: var(--ok); border-color: var(--ok); color: #fff; font-weight: 600; }
+button.ok-solid:hover { background: var(--ok); filter: brightness(1.1); }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 button.link { background: none; border: none; color: var(--frost); padding: 2px 4px; min-height: 0; font-weight: 500; }
 button.link:hover { text-decoration: underline; background: none; }
@@ -214,10 +220,10 @@ button.wide, .btn.wide { width: 100%; }
 .chip.big-chip b { color: var(--ink); }
 .chip.big-chip small { color: var(--muted); font-size: 0.78rem; font-weight: 400; }
 .chip.big-chip.on, .chip.big-chip.on:hover { background: #eaf4fb; border-color: var(--frost); box-shadow: inset 0 0 0 1px var(--frost); color: var(--ink); }
-.chip.qc-chip.on { border-width: 2px; font-weight: 600; }
-.chip.qc-chip.on.qc-PASSED { background: var(--ok-bg); color: var(--ok); border-color: var(--ok); }
-.chip.qc-chip.on.qc-PENDING { background: var(--warn-bg); color: var(--warn); border-color: var(--warn); }
-.chip.qc-chip.on.qc-REDO { background: var(--bad-bg); color: var(--bad); border-color: var(--bad); }
+/* ปุ่ม "+ เพิ่มใหม่" ต่อท้ายตัวเลือก และฟอร์มเพิ่มด่วน */
+.chip.add-chip { min-height: 56px; border-style: dashed; border-color: #b9c4d8; color: var(--frost); background: transparent; border-radius: 14px; }
+.chip.add-chip[aria-expanded="true"] { border-style: solid; border-color: var(--frost); background: #eaf4fb; }
+.quick-add { display: grid; gap: 8px; padding: 12px; margin: 0 0 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--mist); }
 
 /* ---------- ตาราง ---------- */
 .table-wrap { overflow-x: auto; }
@@ -249,9 +255,10 @@ tr.inactive td { opacity: 0.55; }
   display: inline-block; padding: 2px 10px; border-radius: 99px; font-size: 0.76rem; font-weight: 600; white-space: nowrap;
   background: var(--mist-2); color: var(--midnight);
 }
-.badge.ok, .badge.qc-PASSED { background: var(--ok-bg); color: var(--ok); }
-.badge.warn, .badge.qc-PENDING { background: var(--warn-bg); color: var(--warn); }
-.badge.bad, .badge.qc-REDO { background: var(--bad-bg); color: var(--bad); }
+.badge.ok, .badge.stage-passed { background: var(--ok-bg); color: var(--ok); }
+.badge.warn, .badge.stage-submitted { background: var(--warn-bg); color: var(--warn); }
+.badge.bad, .badge.stage-returned { background: var(--bad-bg); color: var(--bad); }
+.badge.stage-open { background: var(--mist-2); color: var(--midnight); }
 .badge.pending { background: var(--mist-2); color: var(--midnight); }
 .alert { padding: 11px 14px; border-radius: 12px; margin: 10px 0; border: 1px solid transparent; }
 .alert.ok { background: var(--ok-bg); color: #14532d; border-color: #cbe9d6; }
@@ -383,6 +390,18 @@ button.pill:hover { filter: brightness(0.97); }
 .timeline li { display: grid; grid-template-columns: 150px 1fr; gap: 2px 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
 .timeline li > :last-child { grid-column: 2; }
 .checklist { list-style: none; padding: 0; margin: 0 0 12px; display: grid; gap: 3px; }
+/* ส่งงาน / ตรวจ QC: ประวัติทุกขั้น (ใคร เมื่อไร หมายเหตุ) */
+.flow-sub { margin: 14px 0 8px; font-weight: 600; color: var(--ink); font-size: 0.92rem; }
+.flow-trail { list-style: none; margin: 0 0 4px 6px; padding: 0 0 0 16px; border-left: 2px solid var(--line); display: grid; gap: 12px; }
+.flow-trail li { position: relative; display: grid; gap: 1px; }
+.flow-trail li::before {
+  content: ""; position: absolute; left: -24px; top: 5px; width: 10px; height: 10px; border-radius: 50%;
+  background: #fff; border: 2px solid var(--muted);
+}
+.flow-trail li.ev-submit::before { border-color: var(--frost); background: var(--frost); }
+.flow-trail li.ev-pass::before { border-color: var(--ok); background: var(--ok); }
+.flow-trail li.ev-return::before { border-color: var(--bad); background: var(--bad); }
+.flow-trail .note { color: var(--ink); overflow-wrap: anywhere; }
 .muted { color: var(--muted); }
 .small { font-size: 0.85rem; }
 .nowrap { white-space: nowrap; }

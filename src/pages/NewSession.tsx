@@ -1,12 +1,13 @@
 // เริ่มงานใหม่แบบเร็ว: จำโปรเจกต์/คนขับ/รถที่ใช้ล่าสุด ตั้งชื่องานให้อัตโนมัติ แล้วไปหน้าบันทึกทันที
-import { useEffect, useState } from "react";
-import { Link, useNavigate } from "react-router";
-import { can } from "../../shared/labels";
+// ไม่มีคนขับ/รถ/โปรเจกต์ที่ต้องการ: กด "+ เพิ่มใหม่" ได้เลยในหน้านี้
+import { useCallback, useEffect, useState } from "react";
+import { useNavigate } from "react-router";
+import type { MasterType } from "../../shared/labels";
 import { addMinutesHHMM, bkkDate, bkkHHMM, resolvePlannedRounds, type PlannedRoundInput } from "../../shared/time";
 import type { Master } from "../../shared/types";
 import { useI18n } from "../i18n";
 import { api, errMsg } from "../lib/api";
-import { useAuth } from "../lib/auth";
+import { MASTER_FIELDS, addMaster, type AddResult } from "../lib/master";
 import { SOP } from "../lib/sop";
 import { lsGet, lsSet } from "../lib/store";
 
@@ -21,47 +22,117 @@ function roundedNow(): string {
   return addMinutesHHMM("00:00", Math.min(Math.ceil((h * 60 + m) / 15) * 15, 23 * 60 + 45));
 }
 
-/** เลือกได้ด้วยการแตะครั้งเดียว (ถ้าตัวเลือกไม่เกิน 6 รายการ) ไม่งั้นเป็น dropdown */
-function Choice({ label, value, onChange, options }: { label: string; value: string; onChange: (v: string) => void; options: Opt[] }) {
+/** เพิ่มคนขับ / รถ / โปรเจกต์ใหม่จากหน้านี้ (อยู่ในฟอร์มสร้างงาน: กด Enter ต้องไม่ส่งฟอร์มหลัก) */
+function QuickAdd({ type, onDone, onCancel }: { type: MasterType; onDone: (r: AddResult, name: string) => void; onCancel: () => void }) {
   const { t } = useI18n();
+  const c = MASTER_FIELDS[type];
+  const [main, setMain] = useState("");
+  const [sub, setSub] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  async function save() {
+    const name = main.trim();
+    if (!name || busy) return;
+    setBusy(true);
+    setErr("");
+    try {
+      onDone(await addMaster(type, name, sub), name);
+    } catch (e) {
+      setErr(errMsg(e));
+      setBusy(false);
+    }
+  }
+  const enter = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      void save();
+    }
+  };
+  return (
+    <div className="quick-add">
+      <input autoFocus maxLength={200} aria-label={t(c.mainPh)} placeholder={`${t(c.mainPh)} *`} value={main} onChange={(e) => setMain(e.target.value)} onKeyDown={enter} />
+      <input maxLength={300} aria-label={t(c.subPh)} placeholder={t(c.subPh)} value={sub} onChange={(e) => setSub(e.target.value)} onKeyDown={enter} />
+      {err && <div className="alert bad small m0">{err}</div>}
+      <div className="row m0">
+        <button type="button" className="pri" disabled={!main.trim() || busy} onClick={() => void save()}>{t("c.add")}</button>
+        <button type="button" onClick={onCancel}>{t("c.cancel")}</button>
+      </div>
+    </div>
+  );
+}
+
+/** เลือกได้ด้วยการแตะครั้งเดียว (ถ้าตัวเลือกไม่เกิน 6 รายการ) ไม่งั้นเป็น dropdown — มีปุ่ม "+ เพิ่มใหม่" ต่อท้ายเสมอ */
+function Choice(p: { label: string; type: MasterType; value: string; onChange: (v: string) => void; onAdded: (id: string) => Promise<void>; options: Opt[] }) {
+  const { label, value, onChange, options } = p;
+  const { t } = useI18n();
+  const [adding, setAdding] = useState(false);
+  const [msg, setMsg] = useState("");
+  const addBtn = (
+    <button type="button" className="chip add-chip" aria-expanded={adding} onClick={() => { setAdding(!adding); setMsg(""); }}>
+      {t("nj.addNew")}
+    </button>
+  );
+  const extra = (
+    <>
+      {adding && (
+        <QuickAdd
+          type={p.type}
+          onCancel={() => setAdding(false)}
+          onDone={(r, name) => {
+            setAdding(false);
+            setMsg(r.existed ? t("nj.dupPicked", { name }) : r.reactivated ? t("md.reactivated", { name }) : "");
+            void p.onAdded(r.id);
+          }}
+        />
+      )}
+      {msg && <div className="muted small">{msg}</div>}
+    </>
+  );
   if (options.length <= 6) {
     return (
       <div className="field">
         <span>{label} *</span>
-        <div className="chips" role="radiogroup" aria-label={label}>
-          {options.map((o) => (
-            <button
-              key={o.id}
-              type="button"
-              role="radio"
-              aria-checked={o.id === value}
-              className={`chip big-chip${o.id === value ? " on" : ""}`}
-              onClick={() => onChange(o.id)}
-            >
-              <b>{o.main}</b>
-              {o.sub && <small>{o.sub}</small>}
-            </button>
-          ))}
+        <div className="chips">
+          <div className="chips m0" role="radiogroup" aria-label={label}>
+            {options.map((o) => (
+              <button
+                key={o.id}
+                type="button"
+                role="radio"
+                aria-checked={o.id === value}
+                className={`chip big-chip${o.id === value ? " on" : ""}`}
+                onClick={() => onChange(o.id)}
+              >
+                <b>{o.main}</b>
+                {o.sub && <small>{o.sub}</small>}
+              </button>
+            ))}
+          </div>
+          {addBtn}
         </div>
+        {extra}
       </div>
     );
   }
   return (
-    <label className="field">
+    <div className="field">
       <span>{label} *</span>
-      <select value={value} onChange={(e) => onChange(e.target.value)}>
-        <option value="">{t("c.choose")}</option>
-        {options.map((o) => (
-          <option key={o.id} value={o.id}>{o.main}{o.sub ? ` (${o.sub})` : ""}</option>
-        ))}
-      </select>
-    </label>
+      <div className="row m0">
+        <select className="grow" aria-label={label} value={value} onChange={(e) => onChange(e.target.value)}>
+          <option value="">{t("c.choose")}</option>
+          {options.map((o) => (
+            <option key={o.id} value={o.id}>{o.main}{o.sub ? ` (${o.sub})` : ""}</option>
+          ))}
+        </select>
+        {addBtn}
+      </div>
+      {extra}
+    </div>
   );
 }
 
 export default function NewSession() {
   const nav = useNavigate();
-  const { user } = useAuth();
   const { t, f } = useI18n();
   const today = bkkDate();
   const [m, setM] = useState<Master | null>(null);
@@ -99,6 +170,18 @@ export default function NewSession() {
   }, []);
 
   const set = <K extends keyof typeof form>(k: K, v: (typeof form)[K]) => setForm((x) => ({ ...x, [k]: v }));
+  /** เพิ่มรายการใหม่แล้ว: โหลดรายการใหม่ แล้วเลือกรายการนั้นให้ */
+  const added = useCallback(
+    (k: "projectId" | "driverId" | "vehicleId") => async (id: string) => {
+      try {
+        setM(await api<Master>("/master"));
+      } catch (e) {
+        setErr(errMsg(e));
+      }
+      setForm((x) => ({ ...x, [k]: id }));
+    },
+    [],
+  );
   const setR = (i: number, k: keyof PlannedRoundInput, v: string) => setRounds((rs) => rs.map((r, j) => (j === i ? { ...r, [k]: v } : r)));
   const addRun = () =>
     setRounds((rs) => {
@@ -136,15 +219,13 @@ export default function NewSession() {
     <form className="newjob" onSubmit={submit}>
       <div className="card">
         <h2>{t("nj.title")}</h2>
-        {missing && (
-          <div className="alert warn">
-            {t("nj.missing")}{" "}
-            {user && can.admin(user.role) ? <Link to="/admin?tab=master">{t("nj.missingAdmin")}</Link> : t("nj.missingAsk")}
-          </div>
-        )}
-        <Choice label={t("col.project")} value={form.projectId} onChange={(v) => set("projectId", v)} options={projects.map((p) => ({ id: p.id, main: p.name, sub: p.area }))} />
-        <Choice label={t("col.driver")} value={form.driverId} onChange={(v) => set("driverId", v)} options={drivers.map((d) => ({ id: d.id, main: d.name, sub: d.team }))} />
-        <Choice label={t("col.vehicle")} value={form.vehicleId} onChange={(v) => set("vehicleId", v)} options={vehicles.map((v) => ({ id: v.id, main: v.plate, sub: v.equipment }))} />
+        {missing && <div className="alert warn">{t("nj.missingAdd")}</div>}
+        <Choice label={t("col.project")} type="projects" value={form.projectId} onChange={(v) => set("projectId", v)} onAdded={added("projectId")}
+          options={projects.map((p) => ({ id: p.id, main: p.name, sub: p.area }))} />
+        <Choice label={t("col.driver")} type="drivers" value={form.driverId} onChange={(v) => set("driverId", v)} onAdded={added("driverId")}
+          options={drivers.map((d) => ({ id: d.id, main: d.name, sub: d.team }))} />
+        <Choice label={t("col.vehicle")} type="vehicles" value={form.vehicleId} onChange={(v) => set("vehicleId", v)} onAdded={added("vehicleId")}
+          options={vehicles.map((v) => ({ id: v.id, main: v.plate, sub: v.equipment }))} />
 
         <div>
           <div className="field">

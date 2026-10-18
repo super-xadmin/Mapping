@@ -1,23 +1,31 @@
 // หน้าแรก: ปุ่มเริ่มงานใหม่ + งานวันนี้ (ทำต่อได้ในแตะเดียว) + ประวัติงานพร้อมตัวกรองแบบแตะ
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
-import { QC_STATUSES, can } from "../../shared/labels";
+import { STAGES, can, isLockedStage } from "../../shared/labels";
 import { bkkDate } from "../../shared/time";
 import type { Master, Session, SessionList } from "../../shared/types";
-import { useI18n } from "../i18n";
+import { useI18n, type Formatters, type TFn } from "../i18n";
 import { api, errMsg } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { exportSummaryCsv } from "../lib/exporters";
-import { CalBadge, ErrorBox, QcBadge, useMedia } from "../components/ui";
+import { CalBadge, ErrorBox, StageBadge, useMedia } from "../components/ui";
 
 const PAGE = 50;
-const FILTER_KEYS = ["from", "to", "projectId", "driverId", "vehicleId", "qc", "cal", "q"] as const;
+const FILTER_KEYS = ["from", "to", "projectId", "driverId", "vehicleId", "stage", "cal", "q"] as const;
 const CHIPS = [
-  { id: "all", key: "c.all", qc: "", cal: "" },
-  { id: "pending", key: "home.chipPending", qc: "PENDING", cal: "" },
-  { id: "redo", key: "home.chipRedo", qc: "REDO", cal: "" },
-  { id: "nocal", key: "home.chipNoCal", qc: "", cal: "missing" },
+  { id: "all", key: "c.all", stage: "", cal: "" },
+  { id: "pending", key: "home.chipPending", stage: "submitted", cal: "" },
+  { id: "redo", key: "home.chipRedo", stage: "returned", cal: "" },
+  { id: "nocal", key: "home.chipNoCal", stage: "", cal: "missing" },
 ] as const;
+
+/** ใครส่ง / ใครตรวจ ล่าสุด (ไว้ตามหาคนรับผิดชอบ) */
+function flowLine(s: Session, t: TFn, f: Formatters): string {
+  if (s.stage === "submitted") return t("home.submittedBy", { by: s.submittedBy ?? "-", at: f.dt(s.submittedAt) });
+  if (s.stage === "passed") return t("home.passedBy", { by: s.qcBy ?? "-", at: f.dt(s.qcAt) });
+  if (s.stage === "returned") return t("home.returnedBy", { by: s.qcBy ?? "-", note: s.qcNote ?? "" });
+  return "";
+}
 
 /** สรุปความคืบหน้าของรอบ */
 function progress(s: Session) {
@@ -31,13 +39,14 @@ function JobCard({ s, canRec, big = false }: { s: Session; canRec: boolean; big?
   const { t, f } = useI18n();
   const nav = useNavigate();
   const p = progress(s);
-  const recordable = canRec && s.qcStatus !== "PASSED";
+  const recordable = canRec && !isLockedStage(s.stage);
+  const who = flowLine(s, t, f);
   return (
     <div className={`job-card${big ? " big-card" : ""}`} onClick={() => nav(`/sessions/${s.id}`)} role="link" tabIndex={0}
       onKeyDown={(e) => e.key === "Enter" && nav(`/sessions/${s.id}`)}>
       <div className="row between m0">
         <span className="muted small">{f.date(s.workDate)}</span>
-        <QcBadge status={s.qcStatus} />
+        <StageBadge stage={s.stage} />
       </div>
       <Link to={`/sessions/${s.id}`} className="job-title" onClick={(e) => e.stopPropagation()}>{s.title}</Link>
       <div className="muted small">
@@ -48,6 +57,7 @@ function JobCard({ s, canRec, big = false }: { s: Session; canRec: boolean; big?
         {p.running ? <span className="badge live-badge">● {t("home.running")}</span> : null}
         <span className="muted">{t("home.runsDone", { done: p.done, total: p.total })} · {f.km(p.km)}</span>
       </div>
+      {who && <div className={`small flow-line ${s.stage === "returned" ? "bad-text" : "muted"}`}>{who}</div>}
       {s.splitRounds && s.rounds.length > 1 && (
         <ul className="mini-runs">
           {s.rounds.map((r) => (
@@ -128,15 +138,16 @@ export default function Dashboard() {
   function chip(c: (typeof CHIPS)[number]) {
     const next = new URLSearchParams(sp);
     next.delete("qc");
+    next.delete("stage");
     next.delete("cal");
-    if (c.qc) next.set("qc", c.qc);
+    if (c.stage) next.set("stage", c.stage);
     if (c.cal) next.set("cal", c.cal);
     setSp(next);
   }
 
   const fv = (k: string) => sp.get(k) ?? "";
-  const activeChip = CHIPS.find((c) => c.qc === fv("qc") && c.cal === fv("cal"))?.id ?? "";
-  const advanced = FILTER_KEYS.filter((k) => k !== "qc" && k !== "cal" && sp.get(k)).length;
+  const activeChip = CHIPS.find((c) => c.stage === fv("stage") && c.cal === fv("cal"))?.id ?? "";
+  const advanced = FILTER_KEYS.filter((k) => k !== "stage" && k !== "cal" && sp.get(k)).length;
   const filtered = FILTER_KEYS.some((k) => sp.get(k));
   const today = bkkDate();
   const todays = filtered ? [] : list.filter((s) => s.workDate === today);
@@ -201,9 +212,9 @@ export default function Dashboard() {
             </label>
             <label className="field">
               <span>{t("filter.qc")}</span>
-              <select name="qc" defaultValue={fv("qc")}>
+              <select name="stage" defaultValue={fv("stage")}>
                 <option value="">{t("c.all")}</option>
-                {QC_STATUSES.map((k) => <option key={k} value={k}>{t(`qc.${k}`)}</option>)}
+                {STAGES.map((k) => <option key={k} value={k}>{t(`stage.${k}`)}</option>)}
               </select>
             </label>
             <label className="field">
@@ -247,7 +258,7 @@ export default function Dashboard() {
                       <td className="nowrap">{f.date(s.workDate)}</td>
                       <td>
                         <Link to={`/sessions/${s.id}`}><b>{s.title}</b></Link>
-                        {canRec && s.qcStatus !== "PASSED" && (
+                        {canRec && !isLockedStage(s.stage) && (
                           <div><Link className="small" to={`/record/${s.id}`}>{t("home.continue")} →</Link></div>
                         )}
                       </td>
@@ -281,7 +292,10 @@ export default function Dashboard() {
                         ))}
                       </td>
                       <td className="nowrap">{f.km(s.rounds.reduce((a, r) => a + r.distanceM, 0))}</td>
-                      <td><QcBadge status={s.qcStatus} /></td>
+                      <td>
+                        <StageBadge stage={s.stage} />
+                        {flowLine(s, t, f) && <div className={`small ${s.stage === "returned" ? "bad-text" : "muted"}`}>{flowLine(s, t, f)}</div>}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

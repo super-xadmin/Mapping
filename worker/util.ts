@@ -67,3 +67,17 @@ export function audit(
     .prepare("INSERT INTO audit_log (at, user_id, user_name, action, session_id, detail) VALUES (?, ?, ?, ?, ?, ?)")
     .bind(now(), user?.id ?? null, user?.displayName ?? null, action, sessionId, detail ? JSON.stringify(detail) : null);
 }
+
+/** บันทึกประวัติเฉพาะเมื่อคำสั่งก่อนหน้าใน batch เปลี่ยนข้อมูลจริง (ใช้คู่กับ UPDATE ที่มีเงื่อนไขกันกดชนกัน) */
+export function auditIfChanged(
+  db: D1Database,
+  user: { id: string; displayName: string },
+  action: string,
+  sessionId: string,
+  detail: Record<string, unknown>,
+  at: number,
+): D1PreparedStatement {
+  return db
+    .prepare("INSERT INTO audit_log (at, user_id, user_name, action, session_id, detail) SELECT ?, ?, ?, ?, ?, ? WHERE changes() > 0")
+    .bind(at, user.id, user.displayName, action, sessionId, Object.keys(detail).length ? JSON.stringify(detail) : null);
+}

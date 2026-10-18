@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { bkkHHMMSS } from "../../shared/time";
 import { isSharedKey } from "../../shared/i18n";
 import { codeText, useI18n, type UiKey } from "../i18n";
-import { clearFailed, syncNow, syncStore, type SyncError } from "../lib/outbox";
+import { clearFailed, discardHeld, syncNow, syncStore, type SyncError } from "../lib/outbox";
 import { useStore } from "../lib/store";
 
 export function useOnline(): boolean {
@@ -38,8 +38,8 @@ export default function SyncBar({ compact = false }: { compact?: boolean }) {
   const online = useOnline();
   const errText = useSyncErrorText();
 
-  if (compact && !s.queued && !s.lastError && !s.failed.length && online && !s.storageError) return null;
-  const cls = s.storageError || s.authError ? "bad" : !online || s.lastError ? "warn" : "ok";
+  if (compact && !s.queued && !s.held && !s.lastError && !s.failed.length && online && !s.storageError) return null;
+  const cls = s.storageError || s.authError ? "bad" : !online || s.lastError || s.held ? "warn" : "ok";
   return (
     <div className={`syncbar ${cls}`}>
       <span className="dot" />
@@ -52,6 +52,12 @@ export default function SyncBar({ compact = false }: { compact?: boolean }) {
       )}
       {s.lastError && <div className="small">{errText(s.lastError)}</div>}
       {s.storageError && <div className="small">{t("sync.storage")}</div>}
+      {s.held > 0 && (
+        <div className="small">
+          {t("sync.held", { n: s.held })}{" "}
+          <button className="link" onClick={() => confirm(t("sync.discardConfirm", { n: s.held })) && discardHeld()}>{t("sync.discardHeld")}</button>
+        </div>
+      )}
       {s.failed.length > 0 && (
         <details className="small">
           <summary>{t("sync.failed", { n: s.failed.length })}</summary>

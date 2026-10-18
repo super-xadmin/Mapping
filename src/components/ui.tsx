@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import type { QcStatus } from "../../shared/labels";
+import type { Stage } from "../../shared/labels";
 import { calComplete, type Calibration } from "../../shared/types";
 import { useI18n } from "../i18n";
 
@@ -41,9 +41,10 @@ export function Brand({ light = false }: { light?: boolean }) {
   );
 }
 
-export function QcBadge({ status }: { status: QcStatus }) {
+/** ขั้นของงาน: กำลังทำ / รอตรวจ / ผ่าน QC / ตีกลับ */
+export function StageBadge({ stage }: { stage: Stage }) {
   const { t } = useI18n();
-  return <span className={`badge qc-${status}`}>{t(`qc.${status}`)}</span>;
+  return <span className={`badge stage-${stage}`}>{t(`stage.${stage}`)}</span>;
 }
 
 export function CalBadge({ cals }: { cals: Calibration[] }) {

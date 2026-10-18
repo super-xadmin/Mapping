@@ -8,13 +8,15 @@ import { CHUNK_MAX_POINTS, SYNC_MAX_OPS, type PtArr, type SyncResult } from "../
 import type { AppEnv } from "../env";
 import { requireRole, requireUser } from "../auth";
 import { audit, fail, isUuid, now, qs, readJson, str, tr } from "../util";
+import { STAGE_SQL, lockKey } from "../rows";
 import type { SharedKey } from "../../shared/i18n";
+import type { Stage } from "../../shared/labels";
 
 type RoundState = {
   id: string; session_id: string; seq: number | null; topic: string;
   started_at: number | null; ended_at: number | null; last_t: number | null; last_lat: number | null; last_lng: number | null;
 };
-type SessState = { id: string; qc_status: string; split_rounds: number };
+type SessState = { id: string; stage: Stage; split_rounds: number };
 type CalState = { id: string; session_id: string; seq: number | null; kind: string; started_at: number | null; ended_at: number | null };
 
 const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
@@ -65,7 +67,9 @@ syncRoutes.post("/", async (c) => {
     roundIds.size
       ? DB.prepare(`SELECT id, session_id, seq, topic, started_at, ended_at, last_t, last_lat, last_lng FROM rounds WHERE id IN (${qs(roundIds.size)})`).bind(...roundIds)
       : none(),
-    sessIds.size ? DB.prepare(`SELECT id, qc_status, split_rounds FROM mapping_sessions WHERE id IN (${qs(sessIds.size)})`).bind(...sessIds) : none(),
+    sessIds.size
+      ? DB.prepare(`SELECT s.id, s.split_rounds, ${STAGE_SQL} AS stage FROM mapping_sessions s WHERE s.id IN (${qs(sessIds.size)})`).bind(...sessIds)
+      : none(),
     calIds.size
       ? DB.prepare(`SELECT id, session_id, seq, kind, started_at, ended_at FROM calibrations WHERE id IN (${qs(calIds.size)})`).bind(...calIds)
       : none(),
@@ -79,8 +83,7 @@ syncRoutes.post("/", async (c) => {
   const sessErr = (sid: string): SharedKey | null => {
     const s = sessions.get(sid);
     if (!s) return "err.sessionNotFound";
-    if (s.qc_status === "PASSED") return "err.locked";
-    return null;
+    return lockKey(s.stage); // ส่งงานแล้ว / ผ่าน QC แล้ว ไม่รับข้อมูลเพิ่ม
   };
 
   for (const op of ops) {
@@ -113,10 +116,11 @@ syncRoutes.post("/", async (c) => {
       case "round.start":
       case "round.end":
       case "chunk": {
-        const r = isUuid(op.roundId) ? rounds.get(op.roundId) : undefined;
-        if (!r || r.session_id !== sid) { done("err.roundNotFound"); break; }
+        // ตรวจงานถูกล็อกก่อน: เครื่องจะเก็บรายการไว้ส่งใหม่ (รอบที่เพิ่มตอนออฟไลน์อาจยังไม่มีในเซิร์ฟเวอร์)
         const e = sessErr(sid);
         if (e) { done(e); break; }
+        const r = isUuid(op.roundId) ? rounds.get(op.roundId) : undefined;
+        if (!r || r.session_id !== sid) { done("err.roundNotFound"); break; }
 
         if (op.k === "round.start") {
           if (!okT(op.t)) { done("err.badTime"); break; }
@@ -198,11 +202,12 @@ syncRoutes.post("/", async (c) => {
       }
 
       case "cal.end": {
+        // ตรวจงานถูกล็อกก่อน (Calibration ที่เริ่มตอนออฟไลน์อาจยังรอส่งอยู่ในเครื่อง)
+        const e = sessErr(sid);
+        if (e) { done(e); break; }
         const cal = isUuid(op.calId) ? cals.get(op.calId) : undefined;
         if (!cal || cal.session_id !== sid) { done("err.calNotFound"); break; }
         if (!okT(op.t)) { done("err.badTime"); break; }
-        const e = sessErr(sid);
-        if (e) { done(e); break; }
         if (cal.ended_at == null) {
           const endT = Math.max(op.t, cal.started_at ?? op.t);
           stmts.push(

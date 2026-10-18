@@ -18,6 +18,7 @@ import NewSession from "./pages/NewSession";
 import Recorder from "./pages/Recorder";
 import SessionDetail from "./pages/SessionDetail";
 import Admin from "./pages/Admin";
+import MasterData from "./pages/MasterData";
 
 function Guard({ children }: { children: ReactNode }) {
   const { loading, user, setupRequired, error, refresh } = useAuth();
@@ -67,9 +68,10 @@ function Layout() {
     <>
       <header className="top">
         <Link to="/" className="brand" aria-label="Mapping Log"><Brand /></Link>
-        <nav className="desk-only">
+        <nav className="top-nav">
           <NavLink to="/" end>{t("nav.home")}</NavLink>
           {can.record(user.role) && <NavLink to="/sessions/new">{t("nav.new")}</NavLink>}
+          {can.master(user.role) && <NavLink to="/master">{t("nav.master")}</NavLink>}
           {can.admin(user.role) && <NavLink to="/admin">{t("nav.admin")}</NavLink>}
         </nav>
         <LangSwitch />
@@ -84,6 +86,7 @@ function Layout() {
           </div>
           <Link className="menu-item" to="/">{t("nav.home")}</Link>
           {can.record(user.role) && <Link className="menu-item" to="/sessions/new">{t("nav.new")}</Link>}
+          {can.master(user.role) && <Link className="menu-item" to="/master">{t("nav.master")}</Link>}
           {can.admin(user.role) && <Link className="menu-item" to="/admin">{t("nav.admin")}</Link>}
           <Link className="menu-item" to="/account">{t("nav.account")}</Link>
           <button type="button" className="menu-item danger" onClick={() => void logout()}>{t("nav.logout")}</button>
@@ -115,6 +118,7 @@ export default function App() {
           <Route path="sessions/new" element={<RoleGate need={can.record}><NewSession /></RoleGate>} />
           <Route path="sessions/:id" element={<SessionDetail />} />
           <Route path="record/:id" element={<Recorder />} />
+          <Route path="master" element={<RoleGate need={can.master}><MasterData /></RoleGate>} />
           <Route path="admin" element={<RoleGate need={can.admin}><Admin /></RoleGate>} />
           <Route path="account" element={<Account />} />
           <Route path="*" element={<NotFound />} />

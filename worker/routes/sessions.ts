@@ -1,12 +1,12 @@
-// งาน Mapping: รายการ/ค้นหา, สร้าง, รายละเอียด, แก้ไข, ลบ, QC, พิกัด, ประวัติ, เพิ่ม Calibration
-import { Hono } from "hono";
-import { can, isCalKind, isQc } from "../../shared/labels";
+// งาน Mapping: รายการ/ค้นหา, สร้าง, รายละเอียด, แก้ไข, ลบ, ส่งงาน/QC, พิกัด, ประวัติ, เพิ่ม Calibration
+import { Hono, type Context } from "hono";
+import { can, isCalKind, isQc, isQcAction, isStage, type Stage } from "../../shared/labels";
 import { isDateStr, resolveCalTimes, resolvePlannedRounds } from "../../shared/time";
-import { calComplete } from "../../shared/types";
+import { calComplete, type Session } from "../../shared/types";
 import type { AppEnv } from "../env";
 import { requireRole, requireUser } from "../auth";
-import { CAL_SELECT, ROUND_SELECT, SESSION_SELECT, toSession, type CalDb, type RoundDb, type SessionDb } from "../rows";
-import { audit, clampInt, fail, isUuid, now, readJson, str, tr, uid } from "../util";
+import { CAL_SELECT, ROUND_SELECT, SESSION_SELECT, STAGE_SQL, assertEditable, toSession, type CalDb, type RoundDb, type SessionDb } from "../rows";
+import { audit, auditIfChanged, clampInt, fail, isUuid, now, readJson, str, tr, uid } from "../util";
 
 export const sessionRoutes = new Hono<AppEnv>();
 sessionRoutes.use("*", requireUser);
@@ -49,6 +49,7 @@ sessionRoutes.get("/", async (c) => {
   if (isUuid(q.vehicleId)) { where.push("s.vehicle_id = ?"); params.push(q.vehicleId); }
   if (isUuid(q.projectId)) { where.push("s.project_id = ?"); params.push(q.projectId); }
   if (isQc(q.qc)) { where.push("s.qc_status = ?"); params.push(q.qc); }
+  if (isStage(q.stage)) { where.push(`(${STAGE_SQL}) = ?`); params.push(q.stage); }
   const calOk = "EXISTS (SELECT 1 FROM calibrations c2 WHERE c2.session_id = s.id AND c2.started_at IS NOT NULL AND c2.ended_at IS NOT NULL)";
   if (q.cal === "missing") where.push(`NOT ${calOk}`);
   else if (q.cal === "ok") where.push(calOk);
@@ -131,11 +132,11 @@ sessionRoutes.patch("/:id", requireRole(can.record), async (c) => {
   const id = c.req.param("id");
   const b = await readJson(c);
   const DB = c.env.DB;
-  const s = await DB.prepare("SELECT title, notes, driver_id, vehicle_id, project_id, qc_status FROM mapping_sessions WHERE id = ?")
+  const s = await DB.prepare(`SELECT s.title, s.notes, s.driver_id, s.vehicle_id, s.project_id, ${STAGE_SQL} AS stage FROM mapping_sessions s WHERE s.id = ?`)
     .bind(id)
-    .first<{ title: string; notes: string | null; driver_id: string; vehicle_id: string; project_id: string; qc_status: string }>();
+    .first<{ title: string; notes: string | null; driver_id: string; vehicle_id: string; project_id: string; stage: Stage }>();
   if (!s) fail(404, "err.sessionNotFound");
-  if (s.qc_status === "PASSED") fail(423, "err.locked", undefined, undefined, "locked");
+  assertEditable(s.stage);
   const next = {
     title: b.title !== undefined ? str(b.title, 200) ?? fail(400, "err.titleRequired") : s.title,
     notes: b.notes !== undefined ? str(b.notes, 2000) : s.notes,
@@ -173,27 +174,67 @@ sessionRoutes.delete("/:id", requireRole(can.admin), async (c) => {
   return c.json({ ok: true });
 });
 
-// ---------- สถานะ QC ----------
-sessionRoutes.patch("/:id/qc", requireRole(can.qc), async (c) => {
+// ---------- ส่งงาน → QC ตรวจ ----------
+// ส่งงาน (คนบันทึก) → ผ่าน / ตีกลับ (ผู้ตรวจ QC ที่ไม่ใช่คนส่ง) ทุกขั้นบันทึกชื่อ เวลา และหมายเหตุไว้ใน audit_log
+// ส่งแล้วแก้ไขไม่ได้จนกว่าจะถอนการส่ง (เฉพาะคนส่ง ก่อน QC ตรวจ) หรือถูกตีกลับ
+
+/** สิ่งที่ต้องครบก่อนส่งงาน และก่อนให้ผ่าน QC */
+function readiness(c: Context<AppEnv>, s: Session): string[] {
+  const problems: string[] = [];
+  if (!calComplete(s.calibrations)) problems.push(tr(c, "qcp.noCal"));
+  if (s.calibrations.some((x) => x.startedAt != null && x.endedAt == null)) problems.push(tr(c, "qcp.calOpen"));
+  if (s.rounds.some((r) => r.startedAt != null && r.endedAt == null)) problems.push(tr(c, "qcp.running"));
+  if (!s.rounds.some((r) => r.endedAt != null)) problems.push(tr(c, "qcp.noEnded"));
+  return problems;
+}
+
+sessionRoutes.post("/:id/qc", async (c) => {
   const id = c.req.param("id");
   const b = await readJson(c);
-  if (!isQc(b.status)) fail(400, "err.badStatus");
+  if (!isQcAction(b.action)) fail(400, "err.badStatus");
+  const action = b.action;
   const note = str(b.note, 1000);
+  const user = c.get("user");
+  const review = action === "pass" || action === "return";
+  if (!(review ? can.qc(user.role) : can.record(user.role))) fail(403, "err.forbidden");
   const DB = c.env.DB;
   const s = await loadSession(DB, id);
-  if (b.status === "PASSED") {
-    const problems: string[] = [];
-    if (!calComplete(s.calibrations)) problems.push(tr(c, "qcp.noCal"));
-    if (s.calibrations.some((x) => x.startedAt != null && x.endedAt == null)) problems.push(tr(c, "qcp.calOpen"));
-    if (s.rounds.some((r) => r.startedAt != null && r.endedAt == null)) problems.push(tr(c, "qcp.running"));
-    if (!s.rounds.some((r) => r.endedAt != null)) problems.push(tr(c, "qcp.noEnded"));
+  // เวลาของแต่ละขั้นต้องมากกว่าขั้นก่อนหน้าเสมอ (ใช้ตัดสินขั้นของงาน)
+  const t = Math.max(now(), (s.submittedAt ?? 0) + 1, (s.qcAt ?? 0) + 1);
+  // กันกดชนกัน: เปลี่ยนเฉพาะเมื่อสถานะยังเหมือนตอนที่โหลดมา
+  const guard = "id = ? AND qc_status = ? AND submitted_at IS ? AND qc_at IS ?";
+  const was = [id, s.qcStatus, s.submittedAt, s.qcAt];
+  let update: D1PreparedStatement | null = null;
+  let detail: Record<string, unknown> = note ? { note } : {};
+
+  if (action === "submit") {
+    if (s.stage === "submitted") fail(409, "err.alreadySubmitted", undefined, undefined, "stage");
+    if (s.stage === "passed") fail(409, "err.alreadyPassed", undefined, undefined, "stage");
+    const problems = readiness(c, s);
+    if (problems.length) fail(400, "err.submitBlocked", undefined, { problems }, "not_ready");
+    update = DB.prepare(`UPDATE mapping_sessions SET submitted_at = ?, submitted_by = ? WHERE ${guard}`).bind(t, user.id, ...was);
+  } else if (action === "withdraw") {
+    if (s.stage !== "submitted") fail(409, "err.notSubmitted", undefined, undefined, "stage");
+    if (s.submittedById !== user.id) fail(403, "err.withdrawOwn");
+    update = DB.prepare(`UPDATE mapping_sessions SET submitted_at = NULL, submitted_by = NULL WHERE ${guard}`).bind(...was);
+  } else if (action === "pass") {
+    if (s.stage === "passed") fail(409, "err.alreadyPassed", undefined, undefined, "stage");
+    if (s.stage !== "submitted") fail(409, "err.notSubmitted", undefined, undefined, "stage");
+    if (s.submittedById === user.id) fail(403, "err.selfCheck", undefined, undefined, "self_check");
+    const problems = readiness(c, s);
     if (problems.length) fail(400, "err.qcBlocked", undefined, { problems }, "qc_blocked");
+    update = DB.prepare(`UPDATE mapping_sessions SET qc_status = 'PASSED', qc_note = ?, qc_by = ?, qc_at = ? WHERE ${guard}`).bind(note, user.id, t, ...was);
+  } else {
+    // ตีกลับ: งานที่รอตรวจ หรือยกเลิกผลผ่านของงานที่ผ่านแล้ว — ต้องบอกเหตุผล
+    if (s.stage !== "submitted" && s.stage !== "passed") fail(409, "err.notSubmitted", undefined, undefined, "stage");
+    if (s.submittedById === user.id) fail(403, "err.selfCheck", undefined, undefined, "self_check");
+    if (!note) fail(400, "err.returnNote");
+    update = DB.prepare(`UPDATE mapping_sessions SET qc_status = 'REDO', qc_note = ?, qc_by = ?, qc_at = ? WHERE ${guard}`).bind(note, user.id, t, ...was);
+    detail = { note, from: s.stage };
   }
-  const user = c.get("user");
-  await DB.batch([
-    DB.prepare("UPDATE mapping_sessions SET qc_status = ?, qc_note = ?, qc_by = ?, qc_at = ? WHERE id = ?").bind(b.status, note, user.id, now(), id),
-    audit(DB, user, "qc.update", id, { from: s.qcStatus, to: b.status, note }),
-  ]);
+
+  const [res] = await DB.batch([update, auditIfChanged(DB, user, `qc.${action}`, id, detail, t)]);
+  if (!res.meta.changes) fail(409, "err.stageChanged", undefined, undefined, "stage");
   return c.json({ ok: true });
 });
 
@@ -253,9 +294,11 @@ sessionRoutes.post("/:id/calibrations", requireRole(can.record), async (c) => {
   const b = await readJson(c);
   const DB = c.env.DB;
   const user = c.get("user");
-  const s = await DB.prepare("SELECT work_date, qc_status FROM mapping_sessions WHERE id = ?").bind(id).first<{ work_date: string; qc_status: string }>();
+  const s = await DB.prepare(`SELECT s.work_date, ${STAGE_SQL} AS stage FROM mapping_sessions s WHERE s.id = ?`)
+    .bind(id)
+    .first<{ work_date: string; stage: Stage }>();
   if (!s) fail(404, "err.sessionNotFound");
-  if (s.qc_status === "PASSED") fail(423, "err.locked", undefined, undefined, "locked");
+  assertEditable(s.stage);
   if (!isCalKind(b.kind)) fail(400, "err.calKind");
   const r = resolveCalTimes(s.work_date, String(b.start ?? ""), b.end ? String(b.end) : null, !!b.startNextDay);
   if (!r.ok) fail(400, r.error.key, r.error.params);
