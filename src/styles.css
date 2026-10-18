@@ -402,6 +402,27 @@ button.pill:hover { filter: brightness(0.97); }
 .auth-card { width: 100%; max-width: 420px; padding: 26px; border: none; border-radius: 20px; box-shadow: 0 30px 60px -30px rgba(0, 0, 0, 0.6); }
 .auth-card h1 { font-size: 1.45rem; margin-bottom: 4px; }
 
+/* ---------- ลายน้ำชื่อบัญชี (กันแคปหน้าจอ) ----------
+   อยู่บนสุดของทุกอย่าง (รวมแผนที่/ปุ่ม) แต่จางมากและไม่รับการแตะ จึงกดปุ่มด้านล่างได้ตามปกติ
+   ขอบขาวบาง ๆ ทำให้ยังเห็นบนพื้นสีเข้ม */
+.watermark {
+  position: fixed; inset: 0; width: 100%; height: 100%;
+  z-index: 1400; pointer-events: none;
+  user-select: none; -webkit-user-select: none;
+}
+.watermark text {
+  text-anchor: middle;
+  fill: rgba(22, 32, 58, 0.08);
+  stroke: rgba(255, 255, 255, 0.09); stroke-width: 1.6px; stroke-linejoin: round;
+  paint-order: stroke fill;
+}
+.watermark .wm-name { font-weight: 600; }
+.watermark .wm-meta { font-weight: 500; }
+@media print {
+  header.top, .actionbar { position: static; }
+  .watermark text { fill: rgba(22, 32, 58, 0.14); }
+}
+
 /* ---------- มือถือ ---------- */
 @media (max-width: 720px) {
   main { padding: 12px; }

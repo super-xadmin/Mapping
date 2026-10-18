@@ -9,6 +9,7 @@ import { recStore } from "./lib/recorder";
 import { useStore } from "./lib/store";
 import SyncBar from "./components/SyncBar";
 import { Brand, ErrorBox, Menu, Spinner } from "./components/ui";
+import { Watermark } from "./components/Watermark";
 import Login from "./pages/Login";
 import Setup from "./pages/Setup";
 import Account from "./pages/Account";
@@ -98,6 +99,7 @@ function Layout() {
         {!onRecorder && <SyncBar compact />}
         <Outlet />
       </main>
+      <Watermark name={user.displayName} username={user.username} />
     </>
   );
 }
